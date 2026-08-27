@@ -1,1 +1,3 @@
-8805523416:AAFAKTTNlXbAVLqK6k13MTcgrt_aIJXy5Vc
+import os
+
+TOKEN = os.getenv("TELEGRAM_TOKEN")
