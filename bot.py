@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 # =========================================================
 # ENVIRONMENT VARIABLES
 # =========================================================
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN is not set")
