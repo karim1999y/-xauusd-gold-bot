@@ -3,7 +3,7 @@ import time
 import json
 import urllib.request
 import urllib.parse
-import threading
+from datetime import datetime, timezone
 
 
 # =========================================================
@@ -14,6 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN is not set")
 
@@ -23,10 +24,6 @@ if not TWELVE_DATA_API_KEY:
 if not TELEGRAM_CHAT_ID:
     print("WARNING: TELEGRAM_CHAT_ID is not set")
 
-
-# =========================================================
-# SETTINGS
-# =========================================================
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
@@ -39,15 +36,13 @@ CHECK_SECONDS = 60
 # آخر شمعة تم إرسال إشارة عليها
 last_signal_candle = None
 
-# حماية من تشغيل أكثر من فحص بنفس الوقت
-market_lock = threading.Lock()
-
 
 # =========================================================
-# HTTP
+# HTTP HELPERS
 # =========================================================
 
 def get_json(url):
+
     request = urllib.request.Request(
         url,
         headers={
@@ -56,34 +51,56 @@ def get_json(url):
     )
 
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode())
+        return json.loads(
+            response.read().decode()
+        )
 
 
 def telegram(method, data=None):
+
     url = f"{TELEGRAM_API}/{method}"
 
     encoded = None
 
     if data:
-        encoded = urllib.parse.urlencode(data).encode()
+        clean_data = {
+            k: v for k, v in data.items()
+            if v is not None
+        }
+
+        encoded = urllib.parse.urlencode(
+            clean_data
+        ).encode()
 
     request = urllib.request.Request(
         url,
         data=encoded
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode())
+    with urllib.request.urlopen(
+        request,
+        timeout=35
+    ) as response:
+
+        return json.loads(
+            response.read().decode()
+        )
 
 
 def send_message(chat_id, text):
-    return telegram(
+
+    result = telegram(
         "sendMessage",
         {
             "chat_id": str(chat_id),
             "text": text
         }
     )
+
+    if not result.get("ok"):
+        print("Telegram send error:", result)
+
+    return result
 
 
 # =========================================================
@@ -108,15 +125,19 @@ def get_candles():
     data = get_json(url)
 
     if data.get("status") == "error":
+
         raise RuntimeError(
-            data.get("message", "Twelve Data error")
+            data.get(
+                "message",
+                "Twelve Data error"
+            )
         )
 
     values = data.get("values", [])
 
     if len(values) < 60:
         raise RuntimeError(
-            f"Not enough candles: {len(values)}"
+            "Not enough XAUUSD candles"
         )
 
     # Twelve Data يرجع الأحدث أولاً
@@ -138,7 +159,7 @@ def get_candles():
 
 
 # =========================================================
-# EMA
+# TECHNICAL INDICATORS
 # =========================================================
 
 def ema(values, period):
@@ -148,19 +169,19 @@ def ema(values, period):
 
     multiplier = 2 / (period + 1)
 
-    result = sum(values[:period]) / period
+    result = sum(
+        values[:period]
+    ) / period
 
     for price in values[period:]:
+
         result = (
             (price - result) * multiplier
-        ) + result
+            + result
+        )
 
     return result
 
-
-# =========================================================
-# RSI - Wilder
-# =========================================================
 
 def rsi(values, period=14):
 
@@ -172,16 +193,28 @@ def rsi(values, period=14):
 
     for i in range(1, len(values)):
 
-        change = values[i] - values[i - 1]
+        change = (
+            values[i] - values[i - 1]
+        )
 
-        gains.append(max(change, 0))
-        losses.append(max(-change, 0))
+        gains.append(
+            max(change, 0)
+        )
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
+        losses.append(
+            max(-change, 0)
+        )
+
+    avg_gain = (
+        sum(gains[:period]) / period
+    )
+
+    avg_loss = (
+        sum(losses[:period]) / period
+    )
 
     if avg_loss == 0:
-        return 100.0
+        return 100
 
     rs = avg_gain / avg_loss
 
@@ -189,20 +222,29 @@ def rsi(values, period=14):
         100 / (1 + rs)
     )
 
-    for i in range(period, len(gains)):
+    for i in range(
+        period,
+        len(gains)
+    ):
 
         avg_gain = (
-            (avg_gain * (period - 1))
+            (
+                avg_gain * (period - 1)
+            )
             + gains[i]
         ) / period
 
         avg_loss = (
-            (avg_loss * (period - 1))
+            (
+                avg_loss * (period - 1)
+            )
             + losses[i]
         ) / period
 
         if avg_loss == 0:
-            result = 100.0
+
+            result = 100
+
         else:
 
             rs = avg_gain / avg_loss
@@ -213,10 +255,6 @@ def rsi(values, period=14):
 
     return result
 
-
-# =========================================================
-# ATR
-# =========================================================
 
 def atr(candles, period=14):
 
@@ -230,7 +268,9 @@ def atr(candles, period=14):
         high = candles[i]["high"]
         low = candles[i]["low"]
 
-        previous_close = candles[i - 1]["close"]
+        previous_close = (
+            candles[i - 1]["close"]
+        )
 
         tr = max(
             high - low,
@@ -240,7 +280,9 @@ def atr(candles, period=14):
 
         trs.append(tr)
 
-    return sum(trs[-period:]) / period
+    return sum(
+        trs[-period:]
+    ) / period
 
 
 # =========================================================
@@ -249,13 +291,7 @@ def atr(candles, period=14):
 
 def analyze(candles):
 
-    # =====================================================
-    # USE CLOSED CANDLES ONLY
-    # =====================================================
-
-    if len(candles) < 65:
-        return None
-
+    # آخر شمعة قد تكون غير مكتملة
     closed = candles[:-1]
 
     if len(closed) < 60:
@@ -266,12 +302,19 @@ def analyze(candles):
         for c in closed
     ]
 
-    # =====================================================
-    # INDICATORS
-    # =====================================================
+    # -------------------------
+    # Indicators
+    # -------------------------
 
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
+    ema20 = ema(
+        closes,
+        20
+    )
+
+    ema50 = ema(
+        closes,
+        50
+    )
 
     current_rsi = rsi(
         closes,
@@ -283,40 +326,36 @@ def analyze(candles):
         14
     )
 
+    # EMA20 السابقة
+    previous_closes = closes[:-1]
+
+    previous_ema20 = ema(
+        previous_closes,
+        20
+    )
+
     if (
         ema20 is None
         or ema50 is None
         or current_rsi is None
         or current_atr is None
+        or previous_ema20 is None
     ):
         return None
-
-    # =====================================================
-    # CURRENT CLOSED CANDLE
-    # =====================================================
 
     candle = closed[-1]
     previous = closed[-2]
 
     price = candle["close"]
 
-    # EMA20 من شمعة سابقة
-    previous_ema20 = ema(
-        closes[:-1],
-        20
-    )
-
-    if previous_ema20 is None:
-        return None
-
     # =====================================================
-    # BUY
+    # BUY CONDITIONS
     # =====================================================
 
     buy_score = 0
     buy_reasons = []
 
-    # 1 - Trend
+    # 1
     if ema20 > ema50:
 
         buy_score += 1
@@ -325,7 +364,7 @@ def analyze(candles):
             "EMA20 > EMA50"
         )
 
-    # 2 - Price above EMA20
+    # 2
     if price > ema20:
 
         buy_score += 1
@@ -334,8 +373,8 @@ def analyze(candles):
             "Price > EMA20"
         )
 
-    # 3 - RSI bullish
-    if 52 <= current_rsi <= 68:
+    # 3
+    if 52 <= current_rsi <= 70:
 
         buy_score += 1
 
@@ -343,25 +382,8 @@ def analyze(candles):
             "RSI bullish"
         )
 
-    # 4 - EMA20 rising OR breakout
-    breakout = (
-        candle["close"]
-        > previous["high"]
-    )
-
-    ema_rising = (
-        ema20 > previous_ema20
-    )
-
-    if breakout:
-
-        buy_score += 1
-
-        buy_reasons.append(
-            "Breakout"
-        )
-
-    elif ema_rising:
+    # 4
+    if ema20 > previous_ema20:
 
         buy_score += 1
 
@@ -369,15 +391,20 @@ def analyze(candles):
             "EMA20 rising"
         )
 
+    # اختراق قوي لقمة الشمعة السابقة
+    breakout = (
+        candle["close"]
+        > previous["high"]
+    )
 
     # =====================================================
-    # SELL
+    # SELL CONDITIONS
     # =====================================================
 
     sell_score = 0
     sell_reasons = []
 
-    # 1 - Trend
+    # 1
     if ema20 < ema50:
 
         sell_score += 1
@@ -386,7 +413,7 @@ def analyze(candles):
             "EMA20 < EMA50"
         )
 
-    # 2 - Price below EMA20
+    # 2
     if price < ema20:
 
         sell_score += 1
@@ -395,8 +422,8 @@ def analyze(candles):
             "Price < EMA20"
         )
 
-    # 3 - RSI bearish
-    if 32 <= current_rsi <= 48:
+    # 3
+    if 30 <= current_rsi <= 48:
 
         sell_score += 1
 
@@ -404,25 +431,8 @@ def analyze(candles):
             "RSI bearish"
         )
 
-    # 4 - Breakdown OR EMA20 falling
-    breakdown = (
-        candle["close"]
-        < previous["low"]
-    )
-
-    ema_falling = (
-        ema20 < previous_ema20
-    )
-
-    if breakdown:
-
-        sell_score += 1
-
-        sell_reasons.append(
-            "Breakdown"
-        )
-
-    elif ema_falling:
+    # 4
+    if ema20 < previous_ema20:
 
         sell_score += 1
 
@@ -430,41 +440,66 @@ def analyze(candles):
             "EMA20 falling"
         )
 
+    # كسر قوي لقاع الشمعة السابقة
+    breakdown = (
+        candle["close"]
+        < previous["low"]
+    )
 
     # =====================================================
-    # STRONG SIGNAL ONLY
+    # STRONG SIGNAL
     # =====================================================
 
-    if (
-        buy_score >= 3
-        and buy_score > sell_score
-    ):
+    direction = None
+    reasons = []
+    score = 0
+
+    # BUY
+    if buy_score >= 3 and buy_score > sell_score:
 
         direction = "BUY"
-        score = buy_score
+
         reasons = buy_reasons
 
-    elif (
-        sell_score >= 3
-        and sell_score > buy_score
-    ):
+        score = buy_score
+
+        # إذا كان الاختراق موجود نضيفه كسبب
+        if breakout and score < 4:
+
+            reasons = list(reasons)
+
+            reasons.append(
+                "Breakout"
+            )
+
+    # SELL
+    elif sell_score >= 3 and sell_score > buy_score:
 
         direction = "SELL"
-        score = sell_score
+
         reasons = sell_reasons
+
+        score = sell_score
+
+        if breakdown and score < 4:
+
+            reasons = list(reasons)
+
+            reasons.append(
+                "Breakdown"
+            )
 
     else:
 
         return None
 
-
     # =====================================================
-    # RISK MANAGEMENT
+    # ENTRY / SL / TP
     # =====================================================
 
     entry = price
 
-    # ATR risk
+    # مخاطرة مبنية على ATR
     risk = current_atr * 1.2
 
     if direction == "BUY":
@@ -490,11 +525,6 @@ def analyze(candles):
         tp2 = entry - (
             risk * 2.2
         )
-
-
-    # =====================================================
-    # RETURN
-    # =====================================================
 
     return {
 
@@ -547,59 +577,43 @@ def format_signal(signal):
 
         f"{emoji} الاتجاه: {direction}\n\n"
 
-        f"📍 Entry: "
-        f"{signal['entry']:.2f}\n"
+        f"📍 Entry: {signal['entry']:.2f}\n"
 
-        f"🛑 SL: "
-        f"{signal['sl']:.2f}\n"
+        f"🛑 SL: {signal['sl']:.2f}\n"
 
-        f"🎯 TP1: "
-        f"{signal['tp1']:.2f}\n"
+        f"🎯 TP1: {signal['tp1']:.2f}\n"
 
-        f"🎯 TP2: "
-        f"{signal['tp2']:.2f}\n\n"
+        f"🎯 TP2: {signal['tp2']:.2f}\n\n"
 
         "📊 Timeframe: M15\n"
 
-        f"📈 RSI: "
-        f"{signal['rsi']:.1f}\n"
+        f"📈 RSI: {signal['rsi']:.1f}\n"
 
-        f"📏 ATR: "
-        f"{signal['atr']:.2f}\n"
+        f"📏 ATR: {signal['atr']:.2f}\n"
 
-        f"💪 Signal Score: "
-        f"{signal['score']}/4\n\n"
+        f"💪 Signal Score: {signal['score']}/4\n\n"
 
         "🔎 أسباب الإشارة:\n"
 
         f"{reasons}\n\n"
 
-        "⚠️ إشارة آلية مبنية على "
-        "بيانات السوق، وليست ضمانًا للربح."
+        "⚠️ إشارة آلية مبنية على بيانات السوق، "
+        "وليست ضمانًا للربح."
     )
 
 
 # =========================================================
-# MARKET CHECK
+# AUTOMATIC MARKET CHECK
 # =========================================================
 
 def check_market():
 
     global last_signal_candle
 
-    if not market_lock.acquire(
-        blocking=False
-    ):
-
-        print(
-            "Market check already running."
-        )
-
-        return
-
     try:
 
         print(
+            f"[{datetime.now(timezone.utc)}] "
             "Checking XAUUSD..."
         )
 
@@ -619,7 +633,7 @@ def check_market():
             "candle_time"
         ]
 
-        # منع تكرار نفس شمعة M15
+        # منع تكرار نفس الشمعة
         if candle_time == last_signal_candle:
 
             print(
@@ -629,16 +643,14 @@ def check_market():
 
             return
 
-        # تسجيل الشمعة
+        # حفظ الشمعة
         last_signal_candle = candle_time
 
         message = format_signal(
             signal
         )
 
-        print(
-            "\n" + message + "\n"
-        )
+        print("\n" + message + "\n")
 
         if TELEGRAM_CHAT_ID:
 
@@ -648,52 +660,20 @@ def check_market():
             )
 
             print(
-                "✅ Automatic signal sent."
+                "✅ Automatic signal sent to Telegram."
             )
 
         else:
 
             print(
-                "TELEGRAM_CHAT_ID missing."
+                "⚠️ TELEGRAM_CHAT_ID missing."
             )
 
     except Exception as e:
 
         print(
-            "❌ Market error:",
+            "❌ Market check error:",
             e
-        )
-
-    finally:
-
-        market_lock.release()
-
-
-# =========================================================
-# AUTOMATIC MARKET LOOP
-# =========================================================
-
-def market_loop():
-
-    print(
-        "📡 Automatic market monitor started."
-    )
-
-    while True:
-
-        try:
-
-            check_market()
-
-        except Exception as e:
-
-            print(
-                "Market loop error:",
-                e
-            )
-
-        time.sleep(
-            CHECK_SECONDS
         )
 
 
@@ -712,9 +692,8 @@ def handle_message(message):
         ""
     ).strip()
 
-
     # =====================================================
-    # /START
+    # START
     # =====================================================
 
     if text == "/start":
@@ -727,11 +706,7 @@ def handle_message(message):
 
             "🟡 بوت إشارات الذهب XAUUSD\n\n"
 
-            "📡 المراقبة التلقائية: تعمل\n"
-
-            "⏱ الفحص: كل 60 ثانية\n"
-
-            "🕯 الفريم: M15\n\n"
+            "📡 المراقبة التلقائية مفعلة.\n\n"
 
             "الأوامر:\n"
 
@@ -739,12 +714,11 @@ def handle_message(message):
 
             "/signal - تحليل XAUUSD الآن\n"
 
-            "/status - حالة البوت"
+            "/status - حالة المراقبة"
         )
 
-
     # =====================================================
-    # /TEST
+    # TEST
     # =====================================================
 
     elif text == "/test":
@@ -755,14 +729,13 @@ def handle_message(message):
 
             "✅ Telegram bot is working.\n\n"
 
-            "📡 Automatic market monitor is enabled.\n"
+            "📡 Automatic market monitor is enabled.\n\n"
 
             "⚠️ هذا اختبار فقط وليس إشارة حقيقية."
         )
 
-
     # =====================================================
-    # /SIGNAL
+    # SIGNAL
     # =====================================================
 
     elif text == "/signal":
@@ -790,16 +763,13 @@ def handle_message(message):
 
                     "⏳ لا توجد إشارة قوية حاليًا.\n\n"
 
-                    "لا يوجد BUY أو SELL "
-                    "بدرجة 3/4 على الأقل.\n\n"
-
                     "لن نرسل صفقة إجبارية."
                 )
 
         except Exception as e:
 
             print(
-                "Signal command error:",
+                "Signal error:",
                 e
             )
 
@@ -812,78 +782,32 @@ def handle_message(message):
                 "حاول مرة أخرى لاحقًا."
             )
 
-
     # =====================================================
-    # /STATUS
+    # STATUS
     # =====================================================
 
     elif text == "/status":
 
-        try:
+        candle = (
+            last_signal_candle
+            if last_signal_candle
+            else "لا يوجد"
+        )
 
-            candles = get_candles()
+        send_message(
 
-            signal = analyze(
-                candles
-            )
+            chat_id,
 
-            if signal:
+            "🟢 البوت يعمل\n\n"
 
-                status = (
+            "📡 مراقبة XAUUSD: ON\n"
 
-                    "🟢 البوت يعمل\n\n"
+            "⏱ الفحص: كل 60 ثانية\n"
 
-                    "📡 Automatic Monitor: ON\n"
+            "📊 Timeframe: M15\n\n"
 
-                    "📊 Symbol: XAU/USD\n"
-
-                    "🕯 Timeframe: M15\n"
-
-                    "⏱ Check: 60 seconds\n\n"
-
-                    f"آخر تحليل قوي: "
-                    f"{signal['direction']}\n"
-
-                    f"Score: "
-                    f"{signal['score']}/4\n"
-
-                    f"RSI: "
-                    f"{signal['rsi']:.1f}"
-                )
-
-            else:
-
-                status = (
-
-                    "🟢 البوت يعمل\n\n"
-
-                    "📡 Automatic Monitor: ON\n"
-
-                    "📊 Symbol: XAU/USD\n"
-
-                    "🕯 Timeframe: M15\n"
-
-                    "⏱ Check: 60 seconds\n\n"
-
-                    "⏳ لا توجد إشارة قوية حاليًا."
-                )
-
-            send_message(
-                chat_id,
-                status
-            )
-
-        except Exception:
-
-            send_message(
-
-                chat_id,
-
-                "🟢 البوت يعمل، "
-
-                "لكن تعذر الحصول على بيانات السوق الآن."
-            )
-
+            f"🕯 آخر شمعة مرسلة:\n{candle}"
+        )
 
     # =====================================================
     # UNKNOWN COMMAND
@@ -908,59 +832,66 @@ def handle_message(message):
 
 
 # =========================================================
-# TELEGRAM LOOP
+# TELEGRAM POLLING
 # =========================================================
 
-def telegram_loop():
+def process_telegram_updates(offset):
 
-    print(
-        "📱 Telegram listener started."
-    )
+    try:
 
-    offset = None
+        result = telegram(
 
-    while True:
+            "getUpdates",
 
-        try:
+            {
+                "timeout": 5,
+                "offset": offset
+            }
+        )
 
-            result = telegram(
+        updates = result.get(
+            "result",
+            []
+        )
 
-                "getUpdates",
+        for update in updates:
 
-                {
-                    "timeout": 25,
-                    "offset": offset
-                }
+            offset = (
+                update["update_id"]
+                + 1
             )
 
-            for update in result.get(
-                "result",
-                []
-            ):
+            message = update.get(
+                "message"
+            )
 
-                offset = (
-                    update["update_id"]
-                    + 1
-                )
+            if message:
 
-                message = update.get(
-                    "message"
-                )
-
-                if message:
+                try:
 
                     handle_message(
                         message
                     )
 
-        except Exception as e:
+                except Exception as e:
 
-            print(
-                "❌ Telegram error:",
-                e
-            )
+                    print(
+                        "Message handling error:",
+                        e
+                    )
 
-            time.sleep(5)
+        return offset
+
+    except Exception as e:
+
+        print(
+            "Telegram polling error:",
+            e
+        )
+
+        time.sleep(3)
+
+        return offset
 
 
 # =========================================================
@@ -969,16 +900,18 @@ def telegram_loop():
 
 def main():
 
+    global last_signal_candle
+
     print(
-        "======================================"
+        "================================"
     )
 
     print(
-        "      XAU GOLD SIGNALS BOT v2"
+        "XAU Gold Signals Bot"
     )
 
     print(
-        "======================================"
+        "Automatic market engine started"
     )
 
     print(
@@ -992,55 +925,110 @@ def main():
     )
 
     print(
-        "Automatic check:",
+        "Check every:",
         CHECK_SECONDS,
         "seconds"
     )
 
     print(
-        "======================================"
+        "================================"
     )
 
-
     # =====================================================
-    # TELEGRAM THREAD
-    # =====================================================
-
-    telegram_thread = threading.Thread(
-
-        target=telegram_loop,
-
-        daemon=True
-    )
-
-    telegram_thread.start()
-
-
-    # =====================================================
-    # MARKET THREAD
+    # INITIAL MARKET CHECK
     # =====================================================
 
-    market_thread = threading.Thread(
+    try:
 
-        target=market_loop,
+        candles = get_candles()
 
-        daemon=True
-    )
+        # لا نرسل الإشارة القديمة عند تشغيل البوت.
+        # نبدأ من الشمعة الحالية وننتظر شمعة جديدة.
+        closed = candles[:-1]
 
-    market_thread.start()
+        if closed:
 
+            last_signal_candle = closed[-1][
+                "time"
+            ]
+
+            print(
+                "Startup candle:",
+                last_signal_candle
+            )
+
+    except Exception as e:
+
+        print(
+            "Startup market error:",
+            e
+        )
 
     # =====================================================
-    # KEEP PROCESS ALIVE
+    # TELEGRAM OFFSET
+    # =====================================================
+
+    offset = None
+
+    last_market_check = 0
+
+    # =====================================================
+    # MAIN LOOP
     # =====================================================
 
     while True:
 
-        time.sleep(60)
+        try:
+
+            # ---------------------------------------------
+            # Telegram commands
+            # ---------------------------------------------
+
+            offset = process_telegram_updates(
+                offset
+            )
+
+            # ---------------------------------------------
+            # Automatic market monitoring
+            # ---------------------------------------------
+
+            now = time.time()
+
+            if (
+                now - last_market_check
+                >= CHECK_SECONDS
+            ):
+
+                last_market_check = now
+
+                check_market()
+
+            # ---------------------------------------------
+            # Small sleep
+            # ---------------------------------------------
+
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+
+            print(
+                "Bot stopped."
+            )
+
+            break
+
+        except Exception as e:
+
+            print(
+                "Main loop error:",
+                e
+            )
+
+            time.sleep(5)
 
 
 # =========================================================
-# START
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
