@@ -49,7 +49,7 @@ SYMBOLS = [
 ]
 
 # ---------------------------------------------------------
-# الإعدادات
+# الإعدادات الصارمة
 # ---------------------------------------------------------
 
 M15_INTERVAL = "15m"
@@ -213,10 +213,7 @@ def get_ohlc(symbol, interval, limit):
             }
         )
 
-    # ترتيب الشموع زمنيًا من الأقدم للأحدث
     candles.sort(key=lambda x: x["time"])
-
-    # نستخدم فقط الشموع المغلقة
     candles = [c for c in candles if not c["is_open"]]
 
     return candles
@@ -231,7 +228,7 @@ def get_tick(symbol):
 
 
 # =========================================================
-# INDICATORS (CORRECTED & ACCURATE)
+# INDICATORS
 # =========================================================
 
 def ema_series(values, period):
@@ -302,7 +299,6 @@ def atr(candles, period=14):
 
 
 def adx(candles, period=14):
-    """Wilder's Smoothing ADX Implementation"""
     if len(candles) < (period * 2 + 5):
         return None
 
@@ -453,9 +449,7 @@ def analyze_symbol(symbol, m15, h1):
     if distance_atr > MAX_DISTANCE_ATR:
         return None
 
-    # -----------------------------------------------------
     # BUY SCORE
-    # -----------------------------------------------------
     buy_score = 0
     buy_reasons = []
 
@@ -491,9 +485,7 @@ def analyze_symbol(symbol, m15, h1):
         buy_score += 1
         buy_reasons.append("M15 breakout")
 
-    # -----------------------------------------------------
     # SELL SCORE
-    # -----------------------------------------------------
     sell_score = 0
     sell_reasons = []
 
@@ -529,9 +521,6 @@ def analyze_symbol(symbol, m15, h1):
         sell_score += 1
         sell_reasons.append("M15 breakdown")
 
-    # -----------------------------------------------------
-    # DIRECTION CHOICE
-    # -----------------------------------------------------
     if buy_score >= MIN_SCORE and buy_score > sell_score and h1_trend == "BULL":
         direction = "BUY"
         score = buy_score
@@ -543,9 +532,6 @@ def analyze_symbol(symbol, m15, h1):
     else:
         return None
 
-    # -----------------------------------------------------
-    # RISK MANAGEMENT
-    # -----------------------------------------------------
     entry = price
     risk = current_atr * SL_ATR_MULTIPLIER
 
@@ -662,20 +648,10 @@ def check_symbol(symbol):
         print(f"🔎 Checking {symbol}...")
 
         tick = get_tick(symbol)
-        if not tick:
-            print(f"{symbol}: no tick")
-            return
-
-        if tick.get("marketState") != "open":
-            print(f"{symbol}: market {tick.get('marketState')}")
-            return
-
-        if tick.get("stale"):
-            print(f"{symbol}: stale price")
+        if not tick or tick.get("marketState") != "open" or tick.get("stale"):
             return
 
         if is_in_cooldown(symbol):
-            print(f"{symbol}: cooldown")
             return
 
         m15 = get_ohlc(symbol, M15_INTERVAL, M15_BARS)
@@ -683,16 +659,13 @@ def check_symbol(symbol):
 
         signal = analyze_symbol(symbol, m15, h1)
         if not signal:
-            print(f"{symbol}: no strong setup")
             return
 
         candle_time = signal["candle_time"]
         if last_signal_candle.get(symbol) == candle_time:
-            print(f"{symbol}: already sent")
             return
 
         if not TELEGRAM_CHAT_ID:
-            print("TELEGRAM_CHAT_ID missing")
             return
 
         message = format_signal(signal)
@@ -734,14 +707,10 @@ def handle_message(message):
         send_message(
             chat_id,
             "👋 XAU Forex Signals\n\n"
-            "🟢 البوت يعمل.\n\n"
-            "🥇 XAUUSD\n"
-            "💱 Forex pairs\n\n"
-            "📊 M15 + H1\n"
-            "🧠 Multi-filter strategy\n"
-            "🛡 Risk filtering\n\n"
+            "🟢 البوت يعمل بالنظام الصارم.\n\n"
             "/test\n"
             "/signal\n"
+            "/debug\n"
             "/status"
         )
     elif text == "/test":
@@ -777,6 +746,45 @@ def handle_message(message):
                 "⏳ لا توجد حاليًا إشارة قوية تستوفي كل الفلاتر.\n\n"
                 "وهذا مقصود. لن نرسل صفقة إجبارية."
             )
+
+    elif text == "/debug":
+        send_message(chat_id, "🔍 جاري فحص الأسباب التفصيلية لاستبعاد الأزواج...")
+        report = []
+
+        for symbol in SYMBOLS:
+            try:
+                tick = get_tick(symbol)
+                if not tick:
+                    report.append(f"❌ {symbol}: لا توجد أسعار")
+                    continue
+
+                if tick.get("marketState") != "open":
+                    report.append(f"❌ {symbol}: السوق مغلق")
+                    continue
+
+                m15 = get_ohlc(symbol, M15_INTERVAL, M15_BARS)
+                h1 = get_ohlc(symbol, H1_INTERVAL, H1_BARS)
+
+                h1_trend, _, _, _ = get_h1_trend(h1)
+                closes = [c["close"] for c in m15]
+                c_adx = adx(m15, 14)
+
+                if h1_trend == "NEUTRAL":
+                    report.append(f"⚠️ {symbol}: الاتجاه محايد على H1")
+                elif c_adx and c_adx < 20:
+                    report.append(f"⚠️ {symbol}: الزخم ضعيف (ADX: {c_adx:.1f})")
+                else:
+                    signal = analyze_symbol(symbol, m15, h1)
+                    if not signal:
+                        report.append(f"⚠️ {symbol}: النقاط أقل من {MIN_SCORE}")
+                    else:
+                        report.append(f"✅ {symbol}: صفقة متاحة الآن!")
+
+            except Exception as e:
+                report.append(f"❌ {symbol}: خطأ في البيانات")
+
+        send_message(chat_id, "📊 **تقرير تشخيص النظام الصارم:**\n\n" + "\n".join(report))
+
     elif text == "/status":
         active = []
         for symbol in SYMBOLS:
@@ -794,7 +802,7 @@ def handle_message(message):
             "📡 BiQuote: ON\n"
             "⏱ Scan: 60 seconds\n"
             "📊 M15 + H1\n"
-            "🛡 Strong filtering: ON\n\n"
+            "🛡 Strict filtering: ON\n\n"
             + "\n".join(active)
         )
     else:
@@ -804,6 +812,7 @@ def handle_message(message):
             "/start\n"
             "/test\n"
             "/signal\n"
+            "/debug\n"
             "/status"
         )
 
@@ -814,7 +823,6 @@ def handle_message(message):
 
 def process_telegram_updates(offset):
     try:
-        # تقليل timeout لـ 1 ثانية لتجنب تعطيل الفحص الزمني للبوت
         result = telegram(
             "getUpdates",
             {
@@ -842,7 +850,7 @@ def process_telegram_updates(offset):
     except Exception as e:
         text = str(e)
         if "409" in text or "Conflict" in text:
-            print("❌ TELEGRAM 409: another instance is using getUpdates.")
+            print("❌ TELEGRAM 409: instance conflict")
             time.sleep(10)
             return offset
 
@@ -857,7 +865,7 @@ def process_telegram_updates(offset):
 
 def main():
     print("================================")
-    print("XAU Forex Signals - FIXED & FINAL")
+    print("XAU Forex Signals - STRICT EDITION")
     print("BiQuote FREE DATA | M15 + H1")
     print("Scan:", CHECK_SECONDS, "seconds")
     print("Symbols:", len(SYMBOLS))
@@ -882,10 +890,8 @@ def main():
 
     while True:
         try:
-            # معالجة تحديثات التليجرام
             offset = process_telegram_updates(offset)
 
-            # التأكد من إجراء الفحص الدوري للسوق كل 60 ثانية بالضبط
             now = time.time()
             if now - last_market_check >= CHECK_SECONDS:
                 last_market_check = now
