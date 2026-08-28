@@ -6,46 +6,42 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
 
-
 # =========================================================
-# XAU GOLD SIGNALS BOT v5
+# XAU GOLD SIGNALS v6
+# DATA SOURCE: BiQuote
 # =========================================================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN is not set")
 
-if not TWELVE_DATA_API_KEY:
-    raise RuntimeError("TWELVE_DATA_API_KEY is not set")
-
 if not TELEGRAM_CHAT_ID:
     print("WARNING: TELEGRAM_CHAT_ID is not set")
 
-
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-SYMBOL = "XAU/USD"
-INTERVAL = "15min"
+# =========================================================
+# CONFIG
+# =========================================================
 
-# فحص السوق كل 60 ثانية
+SYMBOL = "XAUUSD"
+INTERVAL = "15m"
+
+# يفحص كل 60 ثانية،
+# لكن لا يحلل إلا عند ظهور شمعة M15 مغلقة جديدة.
 CHECK_SECONDS = 60
 
-# أقل عدد شموع بين إشارتين من نفس الاتجاه
-COOLDOWN_CANDLES = 3
+# عدد الشموع المطلوبة للتحليل
+CANDLE_LIMIT = 120
 
-# الحد الأدنى لقوة الاتجاه بين EMA20 و EMA50
-EMA_DISTANCE_ATR = 0.15
-
-# حالة الإشارات
+# لمنع تكرار نفس الإشارة
 last_signal_candle = None
-last_signal_direction = None
 
 
 # =========================================================
-# HTTP / JSON
+# HTTP
 # =========================================================
 
 def get_json(url, timeout=30):
@@ -53,7 +49,7 @@ def get_json(url, timeout=30):
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "XAU-Gold-Signals/5.0",
+            "User-Agent": "XAU-Gold-Signals/6.0",
             "Accept": "application/json",
         },
         method="GET",
@@ -81,17 +77,19 @@ def get_json(url, timeout=30):
         )
 
         raise RuntimeError(
-            f"HTTP {e.code} from market API: "
-            f"{body[:500]}"
+            f"HTTP {e.code}: {body[:500]}"
         ) from e
 
     except urllib.error.URLError as e:
 
         raise RuntimeError(
-            f"Market connection error: "
-            f"{e.reason}"
+            f"Connection error: {e.reason}"
         ) from e
 
+
+# =========================================================
+# TELEGRAM
+# =========================================================
 
 def telegram(method, data=None, timeout=35):
 
@@ -113,7 +111,7 @@ def telegram(method, data=None, timeout=35):
         url,
         data=encoded,
         headers={
-            "User-Agent": "XAU-Gold-Signals/5.0"
+            "User-Agent": "XAU-Gold-Signals/6.0"
         },
         method=(
             "POST"
@@ -144,21 +142,15 @@ def telegram(method, data=None, timeout=35):
         )
 
         raise RuntimeError(
-            f"Telegram HTTP {e.code}: "
-            f"{body[:500]}"
+            f"Telegram HTTP {e.code}: {body[:500]}"
         ) from e
 
     except urllib.error.URLError as e:
 
         raise RuntimeError(
-            f"Telegram connection error: "
-            f"{e.reason}"
+            f"Telegram connection error: {e.reason}"
         ) from e
 
-
-# =========================================================
-# TELEGRAM
-# =========================================================
 
 def send_message(chat_id, text):
 
@@ -173,13 +165,10 @@ def send_message(chat_id, text):
     if not result.get("ok"):
 
         raise RuntimeError(
-            f"Telegram rejected message: "
-            f"{result}"
+            f"Telegram rejected message: {result}"
         )
 
-    print(
-        "✅ Telegram message sent successfully."
-    )
+    print("✅ Telegram message sent.")
 
     return result
 
@@ -191,8 +180,7 @@ def check_telegram():
     if not result.get("ok"):
 
         raise RuntimeError(
-            f"Telegram getMe failed: "
-            f"{result}"
+            f"Telegram getMe failed: {result}"
         )
 
     username = (
@@ -220,9 +208,7 @@ def clear_webhook():
 
         if result.get("ok"):
 
-            print(
-                "✅ Webhook cleared."
-            )
+            print("✅ Webhook cleared.")
 
         else:
 
@@ -240,68 +226,60 @@ def clear_webhook():
 
 
 # =========================================================
-# MARKET DATA
+# BIQUOTE MARKET DATA
 # =========================================================
 
 def get_candles():
 
     params = {
-        "symbol": SYMBOL,
         "interval": INTERVAL,
-        "outputsize": 150,
-        "timezone": "UTC",
-        "apikey": TWELVE_DATA_API_KEY,
+        "limit": CANDLE_LIMIT,
     }
 
     url = (
-        "https://api.twelvedata.com/time_series?"
+        "https://biquote.io/api/"
+        + SYMBOL
+        + "/ohlc?"
         + urllib.parse.urlencode(params)
     )
 
     data = get_json(url)
 
-    if data.get("status") == "error":
+    if not isinstance(data, dict):
 
         raise RuntimeError(
-            "Twelve Data error: "
-            + str(
-                data.get(
-                    "message",
-                    data
-                )
-            )
+            "Invalid BiQuote response."
         )
 
-    values = data.get(
-        "values",
-        []
-    )
+    bars = data.get("bars", [])
 
-    if len(values) < 70:
+    if len(bars) < 60:
 
         raise RuntimeError(
-            f"Not enough XAUUSD candles: "
-            f"{len(values)}"
+            f"Not enough XAUUSD candles: {len(bars)}"
         )
-
-    # Twelve Data يرجع الأحدث أولًا
-    values = list(
-        reversed(values)
-    )
 
     candles = []
 
-    for c in values:
+    for bar in bars:
 
         candles.append(
             {
-                "time": c["datetime"],
-                "open": float(c["open"]),
-                "high": float(c["high"]),
-                "low": float(c["low"]),
-                "close": float(c["close"]),
+                "time": bar["openTime"],
+                "open": float(bar["open"]),
+                "high": float(bar["high"]),
+                "low": float(bar["low"]),
+                "close": float(bar["close"]),
+                "is_open": bool(
+                    bar.get("isOpen", False)
+                ),
             }
         )
+
+    # BiQuote يرجع الأحدث أولًا.
+    # نقلبها حتى تصبح الأقدم -> الأحدث.
+
+    candles.reverse()
 
     return candles
 
@@ -313,11 +291,10 @@ def get_candles():
 def ema(values, period):
 
     if len(values) < period:
+
         return None
 
-    multiplier = 2 / (
-        period + 1
-    )
+    multiplier = 2 / (period + 1)
 
     result = sum(
         values[:period]
@@ -337,15 +314,13 @@ def ema(values, period):
 def rsi(values, period=14):
 
     if len(values) < period + 1:
+
         return None
 
     gains = []
     losses = []
 
-    for i in range(
-        1,
-        len(values)
-    ):
+    for i in range(1, len(values)):
 
         change = (
             values[i]
@@ -371,6 +346,7 @@ def rsi(values, period=14):
     )
 
     if avg_loss == 0:
+
         return 100
 
     for i in range(
@@ -395,6 +371,7 @@ def rsi(values, period=14):
         ) / period
 
     if avg_loss == 0:
+
         return 100
 
     rs = (
@@ -403,22 +380,19 @@ def rsi(values, period=14):
     )
 
     return 100 - (
-        100
-        / (1 + rs)
+        100 / (1 + rs)
     )
 
 
 def atr(candles, period=14):
 
     if len(candles) < period + 1:
+
         return None
 
     trs = []
 
-    for i in range(
-        1,
-        len(candles)
-    ):
+    for i in range(1, len(candles)):
 
         high = candles[i]["high"]
         low = candles[i]["low"]
@@ -441,94 +415,10 @@ def atr(candles, period=14):
 
         trs.append(tr)
 
-    return sum(
-        trs[-period:]
-    ) / period
-
-
-# =========================================================
-# CANDLE CONFIRMATION
-# =========================================================
-
-def bearish_candle(candle):
-
-    candle_range = (
-        candle["high"]
-        - candle["low"]
+    return (
+        sum(trs[-period:])
+        / period
     )
-
-    body = abs(
-        candle["close"]
-        - candle["open"]
-    )
-
-    if candle_range <= 0:
-        return False
-
-    # شمعة حمراء
-    if candle["close"] >= candle["open"]:
-        return False
-
-    # الجسم لازم يكون واضح
-    if body / candle_range < 0.35:
-        return False
-
-    # الإغلاق ضمن الجزء السفلي من الشمعة
-    close_position = (
-        candle["close"]
-        - candle["low"]
-    ) / candle_range
-
-    return close_position <= 0.45
-
-
-def bullish_candle(candle):
-
-    candle_range = (
-        candle["high"]
-        - candle["low"]
-    )
-
-    body = abs(
-        candle["close"]
-        - candle["open"]
-    )
-
-    if candle_range <= 0:
-        return False
-
-    # شمعة خضراء
-    if candle["close"] <= candle["open"]:
-        return False
-
-    # الجسم لازم يكون واضح
-    if body / candle_range < 0.35:
-        return False
-
-    # الإغلاق ضمن الجزء العلوي
-    close_position = (
-        candle["close"]
-        - candle["low"]
-    ) / candle_range
-
-    return close_position >= 0.55
-
-
-# =========================================================
-# CANDLE INDEX
-# =========================================================
-
-def candle_index(
-    candles,
-    candle_time
-):
-
-    for i, candle in enumerate(candles):
-
-        if candle["time"] == candle_time:
-            return i
-
-    return None
 
 
 # =========================================================
@@ -537,23 +427,20 @@ def candle_index(
 
 def analyze(candles):
 
-    if len(candles) < 70:
-        return None
+    # نستبعد أي شمعة ما زالت مفتوحة.
+    closed = [
+        c for c in candles
+        if not c["is_open"]
+    ]
 
-    # آخر شمعة قد تكون غير مغلقة
-    closed = candles[:-1]
+    if len(closed) < 60:
 
-    if len(closed) < 65:
         return None
 
     closes = [
         c["close"]
         for c in closed
     ]
-
-    # -----------------------------------------------------
-    # Current indicators
-    # -----------------------------------------------------
 
     ema20 = ema(
         closes,
@@ -575,25 +462,9 @@ def analyze(candles):
         14
     )
 
-    # -----------------------------------------------------
-    # Previous indicators
-    # -----------------------------------------------------
-
-    previous_closes = closes[:-1]
-
     previous_ema20 = ema(
-        previous_closes,
+        closes[:-1],
         20
-    )
-
-    previous_ema50 = ema(
-        previous_closes,
-        50
-    )
-
-    previous_rsi = rsi(
-        previous_closes,
-        14
     )
 
     if None in (
@@ -602,37 +473,18 @@ def analyze(candles):
         current_rsi,
         current_atr,
         previous_ema20,
-        previous_ema50,
-        previous_rsi,
     ):
-        return None
 
-    # -----------------------------------------------------
-    # Candles
-    # -----------------------------------------------------
+        return None
 
     candle = closed[-1]
     previous = closed[-2]
 
     price = candle["close"]
 
-    # -----------------------------------------------------
-    # EMA distance filter
-    # -----------------------------------------------------
-
-    ema_distance = abs(
-        ema20 - ema50
-    )
-
-    strong_trend = (
-        ema_distance
-        >= current_atr
-        * EMA_DISTANCE_ATR
-    )
-
-    # -----------------------------------------------------
-    # BUY CONDITIONS
-    # -----------------------------------------------------
+    # =====================================================
+    # BUY SCORE
+    # =====================================================
 
     buy_score = 0
     buy_reasons = []
@@ -653,16 +505,12 @@ def analyze(candles):
             "Price > EMA20"
         )
 
-    # RSI لازم يكون صاعد
-    if (
-        50 <= current_rsi <= 68
-        and current_rsi > previous_rsi
-    ):
+    if 52 <= current_rsi <= 70:
 
         buy_score += 1
 
         buy_reasons.append(
-            "RSI bullish + rising"
+            "RSI bullish"
         )
 
     if ema20 > previous_ema20:
@@ -673,28 +521,9 @@ def analyze(candles):
             "EMA20 rising"
         )
 
-    if (
-        strong_trend
-        and ema20 > ema50
-    ):
-
-        buy_score += 1
-
-        buy_reasons.append(
-            "Strong EMA trend"
-        )
-
-    if bullish_candle(candle):
-
-        buy_score += 1
-
-        buy_reasons.append(
-            "Bullish candle confirmation"
-        )
-
-    # -----------------------------------------------------
-    # SELL CONDITIONS
-    # -----------------------------------------------------
+    # =====================================================
+    # SELL SCORE
+    # =====================================================
 
     sell_score = 0
     sell_reasons = []
@@ -715,17 +544,12 @@ def analyze(candles):
             "Price < EMA20"
         )
 
-    # RSI لازم يكون هابط
-    # ونتجنب البيع عندما RSI منخفض جدًا
-    if (
-        40 <= current_rsi <= 50
-        and current_rsi < previous_rsi
-    ):
+    if 30 <= current_rsi <= 48:
 
         sell_score += 1
 
         sell_reasons.append(
-            "RSI bearish + falling"
+            "RSI bearish"
         )
 
     if ema20 < previous_ema20:
@@ -736,28 +560,9 @@ def analyze(candles):
             "EMA20 falling"
         )
 
-    if (
-        strong_trend
-        and ema20 < ema50
-    ):
-
-        sell_score += 1
-
-        sell_reasons.append(
-            "Strong EMA trend"
-        )
-
-    if bearish_candle(candle):
-
-        sell_score += 1
-
-        sell_reasons.append(
-            "Bearish candle confirmation"
-        )
-
-    # -----------------------------------------------------
-    # Breakout / Breakdown
-    # -----------------------------------------------------
+    # =====================================================
+    # BREAKOUT / BREAKDOWN
+    # =====================================================
 
     breakout = (
         candle["close"]
@@ -769,41 +574,49 @@ def analyze(candles):
         < previous["low"]
     )
 
-    # -----------------------------------------------------
-    # FINAL DIRECTION
-    # -----------------------------------------------------
+    # =====================================================
+    # FINAL SIGNAL
+    # =====================================================
 
-    # نطلب 5 من 6 على الأقل
-    # حتى لا يدخل البوت بسبب 3 شروط ضعيفة
     if (
-        buy_score >= 5
+        buy_score >= 3
         and buy_score > sell_score
     ):
 
         direction = "BUY"
+
         reasons = list(
             buy_reasons
         )
+
         score = buy_score
 
-        if breakout:
+        if (
+            breakout
+            and score < 4
+        ):
 
             reasons.append(
                 "Breakout"
             )
 
     elif (
-        sell_score >= 5
+        sell_score >= 3
         and sell_score > buy_score
     ):
 
         direction = "SELL"
+
         reasons = list(
             sell_reasons
         )
+
         score = sell_score
 
-        if breakdown:
+        if (
+            breakdown
+            and score < 4
+        ):
 
             reasons.append(
                 "Breakdown"
@@ -813,37 +626,42 @@ def analyze(candles):
 
         return None
 
-    # -----------------------------------------------------
-    # RISK MANAGEMENT
-    # -----------------------------------------------------
+    # =====================================================
+    # RISK
+    # =====================================================
 
     entry = price
 
-    # SL أوسع قليلًا لتجنب ضربه من الضجيج
-    risk = current_atr * 1.30
+    risk = (
+        current_atr * 1.2
+    )
 
     if direction == "BUY":
 
         sl = entry - risk
 
-        tp1 = entry + (
-            risk * 1.50
+        tp1 = (
+            entry
+            + risk * 1.5
         )
 
-        tp2 = entry + (
-            risk * 2.20
+        tp2 = (
+            entry
+            + risk * 2.2
         )
 
     else:
 
         sl = entry + risk
 
-        tp1 = entry - (
-            risk * 1.50
+        tp1 = (
+            entry
+            - risk * 1.5
         )
 
-        tp2 = entry - (
-            risk * 2.20
+        tp2 = (
+            entry
+            - risk * 2.2
         )
 
     return {
@@ -853,17 +671,15 @@ def analyze(candles):
         "tp1": tp1,
         "tp2": tp2,
         "rsi": current_rsi,
-        "previous_rsi": previous_rsi,
         "atr": current_atr,
         "score": score,
-        "max_score": 6,
         "reasons": reasons,
         "candle_time": candle["time"],
     }
 
 
 # =========================================================
-# SIGNAL FORMAT
+# FORMAT SIGNAL
 # =========================================================
 
 def format_signal(signal):
@@ -884,7 +700,8 @@ def format_signal(signal):
     )
 
     return (
-        "🚨 XAUUSD LIVE SIGNAL v5\n\n"
+
+        "🚨 XAUUSD LIVE SIGNAL\n\n"
 
         f"{emoji} الاتجاه: "
         f"{direction_ar} "
@@ -907,94 +724,19 @@ def format_signal(signal):
         f"📈 RSI: "
         f"{signal['rsi']:.1f}\n"
 
-        f"📉 Previous RSI: "
-        f"{signal['previous_rsi']:.1f}\n"
-
         f"📏 ATR: "
         f"{signal['atr']:.2f}\n"
 
         f"💪 Signal Score: "
-        f"{signal['score']}/6\n\n"
+        f"{signal['score']}/4\n\n"
 
         "🔎 أسباب الإشارة:\n"
-        f"{reasons}\n\n"
 
-        "🛡️ فلتر v5:\n"
-        "• تأكيد شمعة M15\n"
-        "• اتجاه RSI\n"
-        "• قوة اتجاه EMA\n"
-        "• منع الإشارات المتكررة\n\n"
+        f"{reasons}\n\n"
 
         "⚠️ إشارة آلية مبنية على بيانات السوق، "
         "وليست ضمانًا للربح."
     )
-
-
-# =========================================================
-# COOLDOWN
-# =========================================================
-
-def allowed_by_cooldown(
-    candles,
-    signal
-):
-
-    global last_signal_candle
-    global last_signal_direction
-
-    if (
-        last_signal_candle is None
-        or last_signal_direction is None
-    ):
-
-        return True
-
-    # إذا الاتجاه تغير
-    # نسمح بالإشارة الجديدة
-    if (
-        signal["direction"]
-        != last_signal_direction
-    ):
-
-        return True
-
-    current_index = candle_index(
-        candles,
-        signal["candle_time"]
-    )
-
-    last_index = candle_index(
-        candles,
-        last_signal_candle
-    )
-
-    if (
-        current_index is None
-        or last_index is None
-    ):
-
-        return True
-
-    candles_passed = (
-        current_index
-        - last_index
-    )
-
-    if (
-        candles_passed
-        < COOLDOWN_CANDLES
-    ):
-
-        print(
-            "⏳ Same direction cooldown:",
-            candles_passed,
-            "/",
-            COOLDOWN_CANDLES
-        )
-
-        return False
-
-    return True
 
 
 # =========================================================
@@ -1004,7 +746,6 @@ def allowed_by_cooldown(
 def check_market():
 
     global last_signal_candle
-    global last_signal_direction
 
     try:
 
@@ -1019,83 +760,70 @@ def check_market():
 
         candles = get_candles()
 
-        if len(candles) < 2:
-
-            print(
-                "No sufficient candles."
-            )
-
-            return
-
-        closed = candles[:-1]
+        closed = [
+            c for c in candles
+            if not c["is_open"]
+        ]
 
         if not closed:
-            return
-
-        latest_closed_time = (
-            closed[-1]["time"]
-        )
-
-        print(
-            "Latest closed M15 candle:",
-            latest_closed_time
-        )
-
-        signal = analyze(
-            candles
-        )
-
-        if not signal:
 
             print(
-                "⏳ No strong signal."
+                "No closed candles."
             )
 
             return
 
-        print(
-            "Signal candidate:",
-            signal["direction"],
-            "Score:",
-            signal["score"],
-            "/6",
-            signal["candle_time"]
+        latest_candle = closed[-1]
+
+        latest_time = (
+            latest_candle["time"]
         )
 
-        candle_time = (
-            signal["candle_time"]
+        print(
+            "Latest closed M15:",
+            latest_time
         )
 
         # -------------------------------------------------
-        # نفس الشمعة
+        # لا نحلل نفس الشمعة أكثر من مرة
         # -------------------------------------------------
 
         if (
-            candle_time
+            latest_time
             == last_signal_candle
         ):
 
             print(
-                "Already handled candle:",
-                candle_time
+                "Same candle already checked."
             )
 
             return
 
         # -------------------------------------------------
-        # Cooldown
+        # نسجل الشمعة التي تم فحصها
+        # حتى لا نكررها كل دقيقة.
         # -------------------------------------------------
 
-        if not allowed_by_cooldown(
-            candles,
-            signal
-        ):
+        last_signal_candle = (
+            latest_time
+        )
+
+        signal = analyze(candles)
+
+        if not signal:
+
+            print(
+                "⏳ No valid signal."
+            )
 
             return
 
-        # -------------------------------------------------
-        # Telegram
-        # -------------------------------------------------
+        print(
+            "🚨 Signal:",
+            signal["direction"],
+            signal["score"],
+            "/4"
+        )
 
         if not TELEGRAM_CHAT_ID:
 
@@ -1109,34 +837,14 @@ def check_market():
             signal
         )
 
-        result = send_message(
+        send_message(
             TELEGRAM_CHAT_ID,
             message
         )
 
-        if result.get("ok"):
-
-            last_signal_candle = (
-                candle_time
-            )
-
-            last_signal_direction = (
-                signal["direction"]
-            )
-
-            print(
-                "🚨 AUTOMATIC SIGNAL SENT!"
-            )
-
-            print(
-                "Direction:",
-                last_signal_direction
-            )
-
-            print(
-                "Saved candle:",
-                last_signal_candle
-            )
+        print(
+            "✅ SIGNAL SENT."
+        )
 
     except Exception as e:
 
@@ -1155,8 +863,7 @@ def handle_message(message):
     chat_id = message["chat"]["id"]
 
     text = (
-        message
-        .get("text", "")
+        message.get("text", "")
         .strip()
     )
 
@@ -1170,21 +877,16 @@ def handle_message(message):
             chat_id,
 
             "👋 أهلاً بك في "
-            "XAU Gold Signals v5\n\n"
+            "XAU Gold Signals\n\n"
 
             "📡 المراقبة التلقائية مفعلة.\n\n"
 
-            "🛡️ نظام الدخول الجديد:\n"
-            "• M15\n"
-            "• EMA20 / EMA50\n"
-            "• RSI اتجاهي\n"
-            "• تأكيد شمعة\n"
-            "• فلتر قوة الاتجاه\n"
-            "• Cooldown للإشارات\n\n"
+            "🟢 Data Source: BiQuote\n"
+            "🟡 XAUUSD M15\n\n"
 
             "/test - اختبار Telegram\n"
             "/signal - تحليل XAUUSD الآن\n"
-            "/status - حالة المراقبة"
+            "/status - حالة البوت"
         )
 
     # -----------------------------------------------------
@@ -1203,7 +905,9 @@ def handle_message(message):
             "📡 Automatic market monitor "
             "is enabled.\n\n"
 
-            "🛡️ Strategy: XAU Gold Signals v5\n\n"
+            "🟢 Data Source: BiQuote\n"
+            "🥇 Symbol: XAUUSD\n"
+            "📊 Timeframe: M15\n\n"
 
             "⚠️ هذا اختبار فقط وليس إشارة حقيقية."
         )
@@ -1236,11 +940,10 @@ def handle_message(message):
 
                     "⏳ لا توجد إشارة قوية حاليًا.\n\n"
 
-                    "v5 ينتظر اجتماع "
-                    "شروط الاتجاه + RSI + EMA "
-                    "+ شمعة التأكيد.\n\n"
+                    "شروط BUY/SELL لم تجتمع "
+                    "بدرجة كافية.\n\n"
 
-                    "🛡️ لن نرسل صفقة إجبارية."
+                    "لن نرسل صفقة إجبارية."
                 )
 
         except Exception as e:
@@ -1279,22 +982,14 @@ def handle_message(message):
 
             "📡 مراقبة XAUUSD: ON\n"
 
+            "🟢 Data Source: BiQuote\n"
+
             "⏱ الفحص: كل 60 ثانية\n"
 
-            "📊 Timeframe: M15\n"
+            "📊 Timeframe: M15\n\n"
 
-            "🛡️ Strategy: v5\n"
-
-            "💪 Minimum Score: 5/6\n"
-
-            f"⏳ Cooldown: "
-            f"{COOLDOWN_CANDLES} candles\n\n"
-
-            "🕯 آخر شمعة تم إرسال إشارة عليها:\n"
-            f"{last_signal_candle or 'لا يوجد'}\n\n"
-
-            "↔️ آخر اتجاه:\n"
-            f"{last_signal_direction or 'لا يوجد'}"
+            "🕯 آخر شمعة تم فحصها:\n"
+            f"{last_signal_candle or 'لا يوجد'}"
         )
 
     # -----------------------------------------------------
@@ -1344,12 +1039,10 @@ def process_telegram_updates(offset):
 
             return offset
 
-        updates = result.get(
+        for update in result.get(
             "result",
             []
-        )
-
-        for update in updates:
+        ):
 
             offset = (
                 update["update_id"]
@@ -1396,7 +1089,7 @@ def process_telegram_updates(offset):
             )
 
             print(
-                "⚠️ تأكد من تشغيل نسخة Railway واحدة فقط."
+                "⚠️ شغّل نسخة Railway واحدة فقط."
             )
 
             time.sleep(10)
@@ -1420,18 +1113,17 @@ def process_telegram_updates(offset):
 def main():
 
     global last_signal_candle
-    global last_signal_direction
 
     print(
         "================================"
     )
 
     print(
-        "XAU Gold Signals Bot v5"
+        "XAU Gold Signals Bot v6"
     )
 
     print(
-        "Automatic market engine started"
+        "Data Source: BiQuote"
     )
 
     print(
@@ -1451,21 +1143,11 @@ def main():
     )
 
     print(
-        "Minimum score: 5/6"
-    )
-
-    print(
-        "Cooldown:",
-        COOLDOWN_CANDLES,
-        "candles"
-    )
-
-    print(
         "================================"
     )
 
     # -----------------------------------------------------
-    # Telegram startup
+    # TELEGRAM
     # -----------------------------------------------------
 
     try:
@@ -1481,70 +1163,53 @@ def main():
         )
 
     # -----------------------------------------------------
-    # Market startup
+    # MARKET STARTUP
     # -----------------------------------------------------
 
     try:
 
         candles = get_candles()
 
-        closed = candles[:-1]
+        closed = [
+            c for c in candles
+            if not c["is_open"]
+        ]
 
         if closed:
 
-            current_candle = (
+            print(
+                "Latest closed candle:",
                 closed[-1]["time"]
             )
 
             print(
-                "Startup candle:",
-                current_candle
-            )
-
-            # مهم:
-            # لا نرسل إشارة قديمة عند إعادة تشغيل Railway
-            last_signal_candle = (
-                current_candle
-            )
-
-            last_signal_direction = None
-
-            print(
-                "ℹ️ Startup completed."
-            )
-
-            print(
-                "ℹ️ Waiting for a new "
-                "confirmed M15 signal."
+                "✅ BiQuote market data OK."
             )
 
     except Exception as e:
 
         print(
-            "❌ Startup market error:",
+            "❌ BiQuote startup error:",
             repr(e)
         )
 
     # -----------------------------------------------------
-    # Main loop
+    # MAIN LOOP
     # -----------------------------------------------------
 
     offset = None
-
     last_market_check = 0
 
     while True:
 
         try:
 
-            # Telegram
             offset = (
                 process_telegram_updates(
                     offset
                 )
             )
 
-            # Market
             now = time.time()
 
             if (
