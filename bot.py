@@ -22,32 +22,89 @@ if not TELEGRAM_CHAT_ID:
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-SYMBOL = "XAUUSD"
+# ---------------------------------------------------------
+# BiQuote
+# ---------------------------------------------------------
 
+BIQUOTE_BASE = "https://biquote.io/api"
+
+# نفحص كل دقيقة
 CHECK_SECONDS = 60
 
-STATE_FILE = "bot_state.json"
+# ---------------------------------------------------------
+# العملات التي نراقبها
+# ---------------------------------------------------------
 
-# نأخذ الإشارات القوية فقط
+SYMBOLS = [
+    "XAUUSD",
+
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "USDCHF",
+    "AUDUSD",
+    "USDCAD",
+    "NZDUSD",
+
+    "EURJPY",
+    "GBPJPY",
+]
+
+# ---------------------------------------------------------
+# الإعدادات
+# ---------------------------------------------------------
+
+M15_INTERVAL = "15m"
+H1_INTERVAL = "1h"
+
+M15_BARS = 250
+H1_BARS = 250
+
 MIN_SCORE = 8
 
-# أقصى عدد إشارات نحتفظ بها للمتابعة
-MAX_OPEN_TRACKED = 3
+# أقل R:R مطلوب
+MIN_RR = 1.5
 
-# منع تكرار نفس الاتجاه بسرعة
-COOLDOWN_CANDLES = 2
+# منع إرسال أكثر من إشارة لنفس الرمز خلال هذه المدة
+COOLDOWN_MINUTES = 60
+
+# ATR لاستخدامه في SL
+SL_ATR_MULTIPLIER = 1.35
+
+# TP الأساسي
+TP1_R_MULTIPLIER = 1.5
+TP2_R_MULTIPLIER = 2.2
+
+# إذا كان السعر بعيدًا جدًا عن EMA20 لا ندخل
+MAX_DISTANCE_ATR = 1.8
+
+# RSI
+BUY_RSI_MIN = 52
+BUY_RSI_MAX = 68
+
+SELL_RSI_MIN = 32
+SELL_RSI_MAX = 48
+
+
+# =========================================================
+# STATE
+# =========================================================
+
+last_signal_candle = {}
+
+last_signal_time = {}
 
 
 # =========================================================
 # HTTP
 # =========================================================
 
-def get_json(url, timeout=20):
+def get_json(url, timeout=25):
 
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "XAU-Gold-Signals/6.0",
+            "User-Agent": "XAU-Forex-Signals-Final/1.0",
             "Accept": "application/json",
         },
         method="GET",
@@ -75,44 +132,43 @@ def get_json(url, timeout=20):
         )
 
         raise RuntimeError(
-            f"HTTP {e.code} from market API: {body[:400]}"
+            f"HTTP {e.code}: {body[:500]}"
         )
 
     except urllib.error.URLError as e:
 
         raise RuntimeError(
-            f"Market connection error: {e.reason}"
+            f"Connection error: {e.reason}"
         )
 
 
-def telegram(
-    method,
-    data=None,
-    timeout=25
-):
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+def telegram(method, data=None, timeout=30):
 
     url = f"{TELEGRAM_API}/{method}"
 
     encoded = None
 
-    if data is not None:
+    if data:
 
         encoded = urllib.parse.urlencode(
-            data
-        ).encode()
+            {
+                k: v
+                for k, v in data.items()
+                if v is not None
+            }
+        ).encode("utf-8")
 
     req = urllib.request.Request(
         url,
         data=encoded,
         headers={
-            "User-Agent":
-                "XAU-Gold-Signals/6.0"
+            "User-Agent": "XAU-Forex-Signals-Final/1.0"
         },
-        method=(
-            "POST"
-            if encoded
-            else "GET"
-        ),
+        method="POST" if encoded else "GET",
     )
 
     try:
@@ -137,24 +193,11 @@ def telegram(
         )
 
         raise RuntimeError(
-            f"Telegram HTTP {e.code}: {body[:400]}"
-        )
-
-    except urllib.error.URLError as e:
-
-        raise RuntimeError(
-            f"Telegram connection error: {e.reason}"
+            f"Telegram HTTP {e.code}: {body[:500]}"
         )
 
 
-# =========================================================
-# TELEGRAM
-# =========================================================
-
-def send_message(
-    chat_id,
-    text
-):
+def send_message(chat_id, text):
 
     result = telegram(
         "sendMessage",
@@ -170,9 +213,7 @@ def send_message(
             f"Telegram rejected message: {result}"
         )
 
-    print(
-        "✅ Telegram message sent."
-    )
+    print("✅ Telegram message sent.")
 
     return result
 
@@ -187,33 +228,34 @@ def check_telegram():
             f"Telegram getMe failed: {result}"
         )
 
+    username = (
+        result
+        .get("result", {})
+        .get("username", "unknown")
+    )
+
     print(
-        "Telegram:",
-        result.get(
-            "result",
-            {}
-        ).get(
-            "username",
-            "unknown"
-        )
+        "✅ Telegram:",
+        username
     )
 
 
-def delete_webhook():
+def clear_webhook():
 
     try:
 
-        telegram(
+        result = telegram(
             "deleteWebhook",
             {
-                "drop_pending_updates":
-                    "false"
+                "drop_pending_updates": "false"
             }
         )
 
-        print(
-            "✅ Webhook cleared."
-        )
+        if result.get("ok"):
+
+            print(
+                "✅ Telegram webhook cleared."
+            )
 
     except Exception as e:
 
@@ -224,180 +266,88 @@ def delete_webhook():
 
 
 # =========================================================
-# STATE
+# BIQUOTE MARKET DATA
 # =========================================================
 
-def load_state():
-
-    default = {
-
-        "last_signal_candle":
-            None,
-
-        "last_signal_direction":
-            None,
-
-        "signals":
-            [],
-
-        "stats": {
-
-            "closed": 0,
-
-            "wins": 0,
-
-            "losses": 0,
-
-            "tp1": 0,
-
-            "tp2": 0,
-
-            "sl": 0,
-        }
-    }
-
-    try:
-
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            state = json.load(f)
-
-        for key, value in default.items():
-
-            if key not in state:
-
-                state[key] = value
-
-        return state
-
-    except Exception:
-
-        return default
-
-
-def save_state(state):
-
-    tmp = STATE_FILE + ".tmp"
-
-    with open(
-        tmp,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            state,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    os.replace(
-        tmp,
-        STATE_FILE
-    )
-
-
-state = load_state()
-
-
-# =========================================================
-# BIQUOTE DATA
-# =========================================================
-
-def get_bars(
-    interval,
-    limit
-):
+def get_ohlc(symbol, interval, limit):
 
     url = (
-        f"https://biquote.io/api/"
-        f"{SYMBOL}/ohlc?"
-        +
-        urllib.parse.urlencode(
+        f"{BIQUOTE_BASE}/"
+        f"{symbol}/ohlc?"
+        + urllib.parse.urlencode(
             {
-                "interval":
-                    interval,
-
-                "limit":
-                    limit,
+                "interval": interval,
+                "limit": limit,
             }
         )
     )
 
     data = get_json(url)
 
-    bars = data.get(
-        "bars",
-        []
-    )
-
-    if not bars:
+    if not isinstance(data, dict):
 
         raise RuntimeError(
-            f"BiQuote returned no "
-            f"{interval} bars"
+            f"Invalid BiQuote response for {symbol}"
         )
 
-    # الأحدث أولاً
-    bars = list(
-        reversed(bars)
-    )
+    bars = data.get("bars", [])
 
-    result = []
+    if len(bars) < 60:
 
-    for b in bars:
+        raise RuntimeError(
+            f"Not enough {symbol} {interval} bars: "
+            f"{len(bars)}"
+        )
 
-        result.append(
+    candles = []
+
+    for bar in bars:
+
+        candles.append(
             {
-                "time":
-                    b["openTime"],
+                "time": bar.get("openTime"),
 
-                "open":
-                    float(b["open"]),
+                "open": float(bar["open"]),
 
-                "high":
-                    float(b["high"]),
+                "high": float(bar["high"]),
 
-                "low":
-                    float(b["low"]),
+                "low": float(bar["low"]),
 
-                "close":
-                    float(b["close"]),
+                "close": float(bar["close"]),
 
-                "isOpen":
-                    bool(
-                        b.get(
-                            "isOpen",
-                            False
-                        )
-                    ),
+                "tick_volume": float(
+                    bar.get("tickVolume", 0)
+                ),
+
+                "is_open": bool(
+                    bar.get("isOpen", False)
+                ),
             }
         )
 
-    return result
-
-
-def get_quote():
-
-    data = get_json(
-        "https://biquote.io/api/"
-        f"{SYMBOL}?allowStale=false"
+    # BiQuote عادة يرجع الأحدث أولاً
+    candles.sort(
+        key=lambda x: x["time"]
     )
 
-    if data.get(
-        "marketState"
-    ) != "open":
+    # نستخدم فقط الشموع المغلقة
+    candles = [
+        c for c in candles
+        if not c["is_open"]
+    ]
 
-        return None
+    return candles
 
-    if data.get(
-        "stale"
-    ):
+
+def get_tick(symbol):
+
+    url = (
+        f"{BIQUOTE_BASE}/{symbol}"
+    )
+
+    data = get_json(url)
+
+    if not isinstance(data, dict):
 
         return None
 
@@ -408,47 +358,62 @@ def get_quote():
 # INDICATORS
 # =========================================================
 
-def ema(
-    values,
-    period
-):
+def ema(values, period):
 
     if len(values) < period:
 
         return None
 
-    multiplier = (
-        2 /
-        (period + 1)
-    )
+    multiplier = 2 / (period + 1)
 
-    result = (
-        sum(
-            values[:period]
-        )
-        /
-        period
-    )
+    result = sum(
+        values[:period]
+    ) / period
 
     for price in values[period:]:
 
         result = (
-            (
-                price - result
-            )
-            *
-            multiplier
-            +
-            result
+            (price - result)
+            * multiplier
+            + result
         )
 
     return result
 
 
-def rsi(
-    values,
-    period=14
-):
+def ema_series(values, period):
+
+    if len(values) < period:
+
+        return []
+
+    multiplier = 2 / (period + 1)
+
+    result = (
+        sum(values[:period])
+        / period
+    )
+
+    output = [
+        None
+    ] * (period - 1)
+
+    output.append(result)
+
+    for price in values[period:]:
+
+        result = (
+            (price - result)
+            * multiplier
+            + result
+        )
+
+        output.append(result)
+
+    return output
+
+
+def rsi(values, period=14):
 
     if len(values) < period + 1:
 
@@ -457,46 +422,34 @@ def rsi(
     gains = []
     losses = []
 
-    for i in range(
-        1,
-        len(values)
-    ):
+    for i in range(1, len(values)):
 
         change = (
             values[i]
-            -
-            values[i - 1]
+            - values[i - 1]
         )
 
         gains.append(
-            max(
-                change,
-                0
-            )
+            max(change, 0)
         )
 
         losses.append(
-            max(
-                -change,
-                0
-            )
+            max(-change, 0)
         )
 
     avg_gain = (
-        sum(
-            gains[:period]
-        )
-        /
-        period
+        sum(gains[:period])
+        / period
     )
 
     avg_loss = (
-        sum(
-            losses[:period]
-        )
-        /
-        period
+        sum(losses[:period])
+        / period
     )
+
+    if avg_loss == 0:
+
+        return 100
 
     for i in range(
         period,
@@ -506,21 +459,17 @@ def rsi(
         avg_gain = (
             (
                 avg_gain
-                *
-                (period - 1)
+                * (period - 1)
             )
-            +
-            gains[i]
+            + gains[i]
         ) / period
 
         avg_loss = (
             (
                 avg_loss
-                *
-                (period - 1)
+                * (period - 1)
             )
-            +
-            losses[i]
+            + losses[i]
         ) / period
 
     if avg_loss == 0:
@@ -529,25 +478,15 @@ def rsi(
 
     rs = (
         avg_gain
-        /
-        avg_loss
+        / avg_loss
     )
 
-    return (
-        100
-        -
-        (
-            100
-            /
-            (1 + rs)
-        )
+    return 100 - (
+        100 / (1 + rs)
     )
 
 
-def atr(
-    candles,
-    period=14
-):
+def atr(candles, period=14):
 
     if len(candles) < period + 1:
 
@@ -561,6 +500,7 @@ def atr(
     ):
 
         high = candles[i]["high"]
+
         low = candles[i]["low"]
 
         previous_close = (
@@ -572,35 +512,27 @@ def atr(
 
             abs(
                 high
-                -
-                previous_close
+                - previous_close
             ),
 
             abs(
                 low
-                -
-                previous_close
+                - previous_close
             ),
         )
 
         trs.append(tr)
 
     return (
-        sum(
-            trs[-period:]
-        )
-        /
-        period
+        sum(trs[-period:])
+        / period
     )
 
 
-def adx(
-    candles,
-    period=14
-):
+def adx(candles, period=14):
 
     if len(candles) < (
-        2 * period + 1
+        period * 2 + 5
     ):
 
         return None
@@ -617,74 +549,75 @@ def adx(
         high = candles[i]["high"]
         low = candles[i]["low"]
 
-        previous_high = (
+        prev_high = (
             candles[i - 1]["high"]
         )
 
-        previous_low = (
+        prev_low = (
             candles[i - 1]["low"]
         )
 
-        previous_close = (
+        prev_close = (
             candles[i - 1]["close"]
         )
 
         tr = max(
             high - low,
-
-            abs(
-                high
-                -
-                previous_close
-            ),
-
-            abs(
-                low
-                -
-                previous_close
-            ),
+            abs(high - prev_close),
+            abs(low - prev_close),
         )
+
+        up_move = (
+            high - prev_high
+        )
+
+        down_move = (
+            prev_low - low
+        )
+
+        if (
+            up_move > down_move
+            and up_move > 0
+        ):
+
+            pdm = up_move
+
+        else:
+
+            pdm = 0
+
+        if (
+            down_move > up_move
+            and down_move > 0
+        ):
+
+            mdm = down_move
+
+        else:
+
+            mdm = 0
 
         trs.append(tr)
+        plus_dm.append(pdm)
+        minus_dm.append(mdm)
 
-        up = (
-            high
-            -
-            previous_high
-        )
+    if len(trs) < period:
 
-        down = (
-            previous_low
-            -
-            low
-        )
-
-        plus_dm.append(
-            up
-            if (
-                up > down
-                and
-                up > 0
-            )
-            else 0
-        )
-
-        minus_dm.append(
-            down
-            if (
-                down > up
-                and
-                down > 0
-            )
-            else 0
-        )
+        return None
 
     atr_value = (
-        sum(
-            trs[:period]
-        )
-        /
-        period
+        sum(trs[:period])
+        / period
+    )
+
+    plus_value = (
+        sum(plus_dm[:period])
+        / period
+    )
+
+    minus_value = (
+        sum(minus_dm[:period])
+        / period
     )
 
     dx_values = []
@@ -697,79 +630,60 @@ def adx(
         atr_value = (
             (
                 atr_value
-                *
-                (period - 1)
+                * (period - 1)
             )
-            +
-            trs[i]
+            + trs[i]
         ) / period
 
-        start = max(
-            0,
-            i - period + 1
-        )
-
-        plus_avg = (
-            sum(
-                plus_dm[start:i + 1]
+        plus_value = (
+            (
+                plus_value
+                * (period - 1)
             )
-            /
-            period
-        )
+            + plus_dm[i]
+        ) / period
 
-        minus_avg = (
-            sum(
-                minus_dm[start:i + 1]
+        minus_value = (
+            (
+                minus_value
+                * (period - 1)
             )
-            /
-            period
-        )
+            + minus_dm[i]
+        ) / period
+
+        if atr_value == 0:
+
+            continue
 
         plus_di = (
             100
-            *
-            plus_avg
-            /
-            atr_value
-            if atr_value
-            else 0
+            * plus_value
+            / atr_value
         )
 
         minus_di = (
             100
-            *
-            minus_avg
-            /
-            atr_value
-            if atr_value
-            else 0
+            * minus_value
+            / atr_value
         )
 
-        if (
+        denominator = (
             plus_di
-            +
-            minus_di
-        ):
+            + minus_di
+        )
 
-            dx = (
-                100
-                *
-                abs(
-                    plus_di
-                    -
-                    minus_di
-                )
-                /
-                (
-                    plus_di
-                    +
-                    minus_di
-                )
+        if denominator == 0:
+
+            continue
+
+        dx = (
+            100
+            * abs(
+                plus_di
+                - minus_di
             )
-
-        else:
-
-            dx = 0
+            / denominator
+        )
 
         dx_values.append(dx)
 
@@ -781,268 +695,256 @@ def adx(
         sum(
             dx_values[-period:]
         )
-        /
-        period
+        / period
     )
 
 
-def body_ratio(candle):
+# =========================================================
+# CANDLE PATTERNS
+# =========================================================
 
-    candle_range = (
+def bullish_candle(candle):
+
+    body = abs(
+        candle["close"]
+        - candle["open"]
+    )
+
+    total = (
         candle["high"]
-        -
-        candle["low"]
+        - candle["low"]
     )
 
-    if candle_range == 0:
+    if total <= 0:
 
-        return 0
+        return False
 
     return (
-        abs(
-            candle["close"]
-            -
-            candle["open"]
-        )
-        /
-        candle_range
+        candle["close"]
+        > candle["open"]
+        and body / total >= 0.45
+    )
+
+
+def bearish_candle(candle):
+
+    body = abs(
+        candle["close"]
+        - candle["open"]
+    )
+
+    total = (
+        candle["high"]
+        - candle["low"]
+    )
+
+    if total <= 0:
+
+        return False
+
+    return (
+        candle["close"]
+        < candle["open"]
+        and body / total >= 0.45
     )
 
 
 # =========================================================
-# V6 ANALYSIS
+# H1 TREND
 # =========================================================
 
-def analyze(
+def get_h1_trend(candles):
+
+    closes = [
+        c["close"]
+        for c in candles
+    ]
+
+    e20 = ema(
+        closes,
+        20
+    )
+
+    e50 = ema(
+        closes,
+        50
+    )
+
+    e200 = ema(
+        closes,
+        200
+    )
+
+    if None in (
+        e20,
+        e50,
+        e200,
+    ):
+
+        return "NEUTRAL", e20, e50, e200
+
+    if (
+        e20 > e50
+        and e50 > e200
+    ):
+
+        return (
+            "BULL",
+            e20,
+            e50,
+            e200
+        )
+
+    if (
+        e20 < e50
+        and e50 < e200
+    ):
+
+        return (
+            "BEAR",
+            e20,
+            e50,
+            e200
+        )
+
+    return (
+        "NEUTRAL",
+        e20,
+        e50,
+        e200
+    )
+
+
+# =========================================================
+# SIGNAL ANALYSIS
+# =========================================================
+
+def analyze_symbol(
+    symbol,
     m15,
     h1
 ):
 
-    m15_closed = [
-        c for c in m15
-        if not c["isOpen"]
-    ]
+    if len(m15) < 210:
 
-    h1_closed = [
-        c for c in h1
-        if not c["isOpen"]
-    ]
-
-    if len(m15_closed) < 80:
         return None
 
-    if len(h1_closed) < 80:
+    if len(h1) < 210:
+
         return None
 
-    m15_closes = [
+    # -----------------------------------------------------
+    # H1 TREND
+    # -----------------------------------------------------
+
+    h1_trend, h1_e20, h1_e50, h1_e200 = (
+        get_h1_trend(h1)
+    )
+
+    if h1_trend == "NEUTRAL":
+
+        return None
+
+    # -----------------------------------------------------
+    # M15
+    # -----------------------------------------------------
+
+    closes = [
         c["close"]
-        for c in m15_closed
+        for c in m15
     ]
 
-    h1_closes = [
-        c["close"]
-        for c in h1_closed
-    ]
-
-    ema20 = ema(
-        m15_closes,
+    e20 = ema(
+        closes,
         20
     )
 
-    ema50 = ema(
-        m15_closes,
+    e50 = ema(
+        closes,
         50
     )
 
-    h1_ema20 = ema(
-        h1_closes,
+    e200 = ema(
+        closes,
+        200
+    )
+
+    previous_closes = closes[:-1]
+
+    previous_e20 = ema(
+        previous_closes,
         20
-    )
-
-    h1_ema50 = ema(
-        h1_closes,
-        50
     )
 
     current_rsi = rsi(
-        m15_closes,
+        closes,
         14
     )
 
     current_atr = atr(
-        m15_closed,
+        m15,
         14
     )
 
     current_adx = adx(
-        m15_closed,
-        14
-    )
-
-    h1_adx = adx(
-        h1_closed,
+        m15,
         14
     )
 
     if None in (
-        ema20,
-        ema50,
-        h1_ema20,
-        h1_ema50,
+        e20,
+        e50,
+        e200,
+        previous_e20,
         current_rsi,
         current_atr,
         current_adx,
-        h1_adx,
     ):
 
         return None
 
-    candle = m15_closed[-1]
-    previous = m15_closed[-2]
-    previous2 = m15_closed[-3]
+    candle = m15[-1]
+    previous = m15[-2]
 
     price = candle["close"]
 
-    # =====================================================
-    # AVOID OVEREXTENDED MOVES
-    # =====================================================
+    # -----------------------------------------------------
+    # لا نتداول إذا ATR غير منطقي
+    # -----------------------------------------------------
 
-    recent_high = max(
-        x["high"]
-        for x in m15_closed[-6:]
+    if current_atr <= 0:
+
+        return None
+
+    # -----------------------------------------------------
+    # المسافة عن EMA20
+    # -----------------------------------------------------
+
+    distance_from_ema = abs(
+        price - e20
     )
 
-    recent_low = min(
-        x["low"]
-        for x in m15_closed[-6:]
+    distance_atr = (
+        distance_from_ema
+        / current_atr
     )
 
-    recent_range = (
-        recent_high
-        -
-        recent_low
-    )
-
-    # إذا تحرك الذهب بقوة كبيرة مؤخرًا،
-    # لا نطارد الحركة.
-    if recent_range > (
-        current_atr * 3.2
+    if (
+        distance_atr
+        > MAX_DISTANCE_ATR
     ):
 
         return None
 
-    # =====================================================
-    # TREND
-    # =====================================================
-
-    bullish_h1 = (
-        h1_ema20
-        >
-        h1_ema50
-    )
-
-    bearish_h1 = (
-        h1_ema20
-        <
-        h1_ema50
-    )
-
-    bullish_m15 = (
-        ema20
-        >
-        ema50
-        and
-        price
-        >
-        ema20
-    )
-
-    bearish_m15 = (
-        ema20
-        <
-        ema50
-        and
-        price
-        <
-        ema20
-    )
-
-    # =====================================================
-    # PULLBACK
-    # =====================================================
-
-    bullish_pullback = (
-        previous["low"]
-        <=
-        ema20
-        or
-        previous2["low"]
-        <=
-        ema20
-    ) and (
-        price
-        >
-        ema20
-    )
-
-    bearish_pullback = (
-        previous["high"]
-        >=
-        ema20
-        or
-        previous2["high"]
-        >=
-        ema20
-    ) and (
-        price
-        <
-        ema20
-    )
-
-    # =====================================================
-    # CONFIRMATION CANDLE
-    # =====================================================
-
-    bullish_confirmation = (
-        candle["close"]
-        >
-        candle["open"]
-        and
-        candle["close"]
-        >
-        previous["high"]
-        and
-        body_ratio(candle)
-        >=
-        0.45
-    )
-
-    bearish_confirmation = (
-        candle["close"]
-        <
-        candle["open"]
-        and
-        candle["close"]
-        <
-        previous["low"]
-        and
-        body_ratio(candle)
-        >=
-        0.45
-    )
-
-    # =====================================================
-    # SCORE
-    # =====================================================
+    # -----------------------------------------------------
+    # BUY SCORE
+    # -----------------------------------------------------
 
     buy_score = 0
     buy_reasons = []
 
-    sell_score = 0
-    sell_reasons = []
-
-    # H1 trend
-    if bullish_h1:
+    # اتجاه H1
+    if h1_trend == "BULL":
 
         buy_score += 2
 
@@ -1050,94 +952,60 @@ def analyze(
             "H1 bullish trend"
         )
 
-    if bearish_h1:
-
-        sell_score += 2
-
-        sell_reasons.append(
-            "H1 bearish trend"
-        )
-
-    # M15 trend
-    if ema20 > ema50:
+    # ترتيب M15
+    if (
+        e20 > e50
+        and e50 > e200
+    ):
 
         buy_score += 2
 
         buy_reasons.append(
-            "M15 EMA trend bullish"
+            "M15 EMA20 > EMA50 > EMA200"
         )
 
-    if ema20 < ema50:
+    # السعر فوق EMA20
+    if price > e20:
 
-        sell_score += 2
-
-        sell_reasons.append(
-            "M15 EMA trend bearish"
-        )
-
-    # Pullback
-    if bullish_pullback:
-
-        buy_score += 2
+        buy_score += 1
 
         buy_reasons.append(
-            "M15 pullback to EMA20"
+            "Price > EMA20"
         )
 
-    if bearish_pullback:
+    # EMA20 صاعد
+    if e20 > previous_e20:
 
-        sell_score += 2
+        buy_score += 1
 
-        sell_reasons.append(
-            "M15 pullback to EMA20"
+        buy_reasons.append(
+            "EMA20 rising"
         )
 
     # RSI
-    if 50 <= current_rsi <= 64:
+    if (
+        BUY_RSI_MIN
+        <= current_rsi
+        <= BUY_RSI_MAX
+    ):
 
         buy_score += 1
 
         buy_reasons.append(
-            "RSI healthy for BUY"
-        )
-
-    if 36 <= current_rsi <= 50:
-
-        sell_score += 1
-
-        sell_reasons.append(
-            "RSI healthy for SELL"
+            "RSI bullish zone"
         )
 
     # ADX
-    if current_adx >= 18:
+    if current_adx >= 20:
 
         buy_score += 1
-        sell_score += 1
 
         buy_reasons.append(
-            "ADX trend strength"
+            f"ADX strong ({current_adx:.1f})"
         )
 
-        sell_reasons.append(
-            "ADX trend strength"
-        )
-
-    if h1_adx >= 18:
-
-        buy_score += 1
-        sell_score += 1
-
-        buy_reasons.append(
-            "H1 ADX strength"
-        )
-
-        sell_reasons.append(
-            "H1 ADX strength"
-        )
-
-    # Confirmation
-    if bullish_confirmation:
+    # شمعة صاعدة
+    if bullish_candle(candle):
 
         buy_score += 1
 
@@ -1145,7 +1013,88 @@ def analyze(
             "Bullish confirmation candle"
         )
 
-    if bearish_confirmation:
+    # Breakout
+    if (
+        candle["close"]
+        > previous["high"]
+    ):
+
+        buy_score += 1
+
+        buy_reasons.append(
+            "M15 breakout"
+        )
+
+    # -----------------------------------------------------
+    # SELL SCORE
+    # -----------------------------------------------------
+
+    sell_score = 0
+    sell_reasons = []
+
+    # اتجاه H1
+    if h1_trend == "BEAR":
+
+        sell_score += 2
+
+        sell_reasons.append(
+            "H1 bearish trend"
+        )
+
+    # ترتيب M15
+    if (
+        e20 < e50
+        and e50 < e200
+    ):
+
+        sell_score += 2
+
+        sell_reasons.append(
+            "M15 EMA20 < EMA50 < EMA200"
+        )
+
+    # السعر تحت EMA20
+    if price < e20:
+
+        sell_score += 1
+
+        sell_reasons.append(
+            "Price < EMA20"
+        )
+
+    # EMA20 هابط
+    if e20 < previous_e20:
+
+        sell_score += 1
+
+        sell_reasons.append(
+            "EMA20 falling"
+        )
+
+    # RSI
+    if (
+        SELL_RSI_MIN
+        <= current_rsi
+        <= SELL_RSI_MAX
+    ):
+
+        sell_score += 1
+
+        sell_reasons.append(
+            "RSI bearish zone"
+        )
+
+    # ADX
+    if current_adx >= 20:
+
+        sell_score += 1
+
+        sell_reasons.append(
+            f"ADX strong ({current_adx:.1f})"
+        )
+
+    # شمعة هابطة
+    if bearish_candle(candle):
 
         sell_score += 1
 
@@ -1153,206 +1102,183 @@ def analyze(
             "Bearish confirmation candle"
         )
 
-    # =====================================================
-    # FINAL SIGNAL
-    # =====================================================
+    # Breakdown
+    if (
+        candle["close"]
+        < previous["low"]
+    ):
 
-    direction = None
+        sell_score += 1
+
+        sell_reasons.append(
+            "M15 breakdown"
+        )
+
+    # -----------------------------------------------------
+    # اختيار الاتجاه
+    # -----------------------------------------------------
 
     if (
-        bullish_m15
-        and
-        bullish_h1
-        and
-        bullish_pullback
-        and
-        bullish_confirmation
-        and
         buy_score >= MIN_SCORE
-        and
-        buy_score > sell_score
+        and buy_score > sell_score
+        and h1_trend == "BULL"
     ):
 
         direction = "BUY"
-
         score = buy_score
-
         reasons = buy_reasons
 
     elif (
-        bearish_m15
-        and
-        bearish_h1
-        and
-        bearish_pullback
-        and
-        bearish_confirmation
-        and
         sell_score >= MIN_SCORE
-        and
-        sell_score > buy_score
+        and sell_score > buy_score
+        and h1_trend == "BEAR"
     ):
 
         direction = "SELL"
-
         score = sell_score
-
         reasons = sell_reasons
 
     else:
 
         return None
 
-    # =====================================================
-    # STOP LOSS / TAKE PROFIT
-    # =====================================================
+    # -----------------------------------------------------
+    # Risk Management
+    # -----------------------------------------------------
 
-    swing_low = min(
-        x["low"]
-        for x in m15_closed[-5:]
+    entry = price
+
+    risk = (
+        current_atr
+        * SL_ATR_MULTIPLIER
     )
 
-    swing_high = max(
-        x["high"]
-        for x in m15_closed[-5:]
-    )
+    if risk <= 0:
+
+        return None
 
     if direction == "BUY":
 
-        sl = min(
-            swing_low,
-            price
-            -
-            current_atr * 1.15
-        )
-
-        risk = (
-            price
-            -
-            sl
-        )
-
-        if (
-            risk
-            <
-            current_atr * 0.85
-            or
-            risk
-            >
-            current_atr * 2.0
-        ):
-
-            return None
+        sl = entry - risk
 
         tp1 = (
-            price
-            +
-            risk * 1.8
+            entry
+            + risk * TP1_R_MULTIPLIER
         )
 
         tp2 = (
-            price
-            +
-            risk * 2.5
+            entry
+            + risk * TP2_R_MULTIPLIER
         )
 
     else:
 
-        sl = max(
-            swing_high,
-            price
-            +
-            current_atr * 1.15
-        )
-
-        risk = (
-            sl
-            -
-            price
-        )
-
-        if (
-            risk
-            <
-            current_atr * 0.85
-            or
-            risk
-            >
-            current_atr * 2.0
-        ):
-
-            return None
+        sl = entry + risk
 
         tp1 = (
-            price
-            -
-            risk * 1.8
+            entry
+            - risk * TP1_R_MULTIPLIER
         )
 
         tp2 = (
-            price
-            -
-            risk * 2.5
+            entry
+            - risk * TP2_R_MULTIPLIER
         )
 
+    rr1 = abs(
+        tp1 - entry
+    ) / abs(
+        entry - sl
+    )
+
+    rr2 = abs(
+        tp2 - entry
+    ) / abs(
+        entry - sl
+    )
+
+    if rr1 < MIN_RR:
+
+        return None
+
     return {
+        "symbol": symbol,
 
-        "direction":
-            direction,
+        "direction": direction,
 
-        "entry":
-            price,
+        "entry": entry,
 
-        "sl":
-            sl,
+        "sl": sl,
 
-        "tp1":
-            tp1,
+        "tp1": tp1,
 
-        "tp2":
-            tp2,
+        "tp2": tp2,
 
-        "rsi":
-            current_rsi,
+        "rsi": current_rsi,
 
-        "atr":
-            current_atr,
+        "atr": current_atr,
 
-        "adx":
-            current_adx,
+        "adx": current_adx,
 
-        "h1_adx":
-            h1_adx,
+        "score": score,
 
-        "score":
-            score,
+        "h1_trend": h1_trend,
 
-        "reasons":
-            reasons,
+        "rr1": rr1,
 
-        "candle_time":
-            candle["time"],
+        "rr2": rr2,
 
-        "risk":
-            risk,
+        "reasons": reasons,
+
+        "candle_time": candle["time"],
     }
 
 
 # =========================================================
-# FORMAT SIGNAL
+# PRICE DECIMALS
+# =========================================================
+
+def price_decimals(symbol):
+
+    if symbol.endswith("JPY"):
+
+        return 3
+
+    if symbol == "XAUUSD":
+
+        return 2
+
+    return 5
+
+
+def format_price(symbol, price):
+
+    digits = price_decimals(
+        symbol
+    )
+
+    return f"{price:.{digits}f}"
+
+
+# =========================================================
+# SIGNAL MESSAGE
 # =========================================================
 
 def format_signal(signal):
 
-    if signal["direction"] == "BUY":
+    symbol = signal["symbol"]
+
+    direction = signal["direction"]
+
+    if direction == "BUY":
 
         emoji = "🟢"
-        direction_ar = "شراء"
+        arabic = "شراء"
 
     else:
 
         emoji = "🔴"
-        direction_ar = "بيع"
+        arabic = "بيع"
 
     reasons = "\n".join(
         f"• {x}"
@@ -1360,271 +1286,170 @@ def format_signal(signal):
     )
 
     return (
+        "🚨 STRONG MARKET SIGNAL\n\n"
 
-        "🚨 XAUUSD V6 SIGNAL\n\n"
+        f"💱 الرمز: {symbol}\n"
 
         f"{emoji} الاتجاه: "
-        f"{direction_ar} "
-        f"({signal['direction']})\n\n"
+        f"{arabic} ({direction})\n\n"
 
         f"📍 Entry: "
-        f"{signal['entry']:.2f}\n"
+        f"{format_price(symbol, signal['entry'])}\n"
 
         f"🛑 SL: "
-        f"{signal['sl']:.2f}\n"
+        f"{format_price(symbol, signal['sl'])}\n"
 
         f"🎯 TP1: "
-        f"{signal['tp1']:.2f}\n"
+        f"{format_price(symbol, signal['tp1'])}\n"
 
         f"🎯 TP2: "
-        f"{signal['tp2']:.2f}\n\n"
+        f"{format_price(symbol, signal['tp2'])}\n\n"
 
-        "📊 Timeframe: M15 + H1\n"
+        "📊 M15 + H1\n"
 
         f"📈 RSI: "
         f"{signal['rsi']:.1f}\n"
 
         f"📏 ATR: "
-        f"{signal['atr']:.2f}\n"
+        f"{signal['atr']:.5f}\n"
 
-        f"💪 ADX M15/H1: "
-        f"{signal['adx']:.1f}/"
-        f"{signal['h1_adx']:.1f}\n"
+        f"💪 ADX: "
+        f"{signal['adx']:.1f}\n"
 
         f"⭐ Score: "
-        f"{signal['score']}\n\n"
+        f"{signal['score']}/10+\n"
 
-        "🔎 الأسباب:\n"
+        f"📐 RR TP1: "
+        f"{signal['rr1']:.2f}\n"
 
+        f"📐 RR TP2: "
+        f"{signal['rr2']:.2f}\n\n"
+
+        f"📈 H1 Trend: "
+        f"{signal['h1_trend']}\n\n"
+
+        "🔎 أسباب الإشارة:\n"
         f"{reasons}\n\n"
 
-        "🛡️ فلترة محافظة:\n"
-        "H1 Trend + M15 Trend + "
-        "Pullback + Confirmation\n\n"
-
-        "⚠️ إشارة آلية. "
-        "لا توجد استراتيجية تضمن عدم الخسارة."
+        "⚠️ هذه إشارة آلية للتحليل فقط، "
+        "ولا يوجد نظام يضمن الربح."
     )
 
 
 # =========================================================
-# TRACK RESULTS
+# COOLDOWN
 # =========================================================
 
-def update_tracked(
-    m15
-):
+def is_in_cooldown(symbol):
 
-    closed = [
-        x for x in m15
-        if not x["isOpen"]
-    ]
-
-    changed = False
-
-    for signal in state["signals"]:
-
-        if signal.get("result"):
-
-            continue
-
-        for candle in closed:
-
-            if candle["time"] <= signal["candle_time"]:
-
-                continue
-
-            if signal["direction"] == "BUY":
-
-                hit_sl = (
-                    candle["low"]
-                    <=
-                    signal["sl"]
-                )
-
-                hit_tp2 = (
-                    candle["high"]
-                    >=
-                    signal["tp2"]
-                )
-
-                hit_tp1 = (
-                    candle["high"]
-                    >=
-                    signal["tp1"]
-                )
-
-            else:
-
-                hit_sl = (
-                    candle["high"]
-                    >=
-                    signal["sl"]
-                )
-
-                hit_tp2 = (
-                    candle["low"]
-                    <=
-                    signal["tp2"]
-                )
-
-                hit_tp1 = (
-                    candle["low"]
-                    <=
-                    signal["tp1"]
-                )
-
-            # -------------------------------------------------
-            # إذا ضرب SL وTP بنفس الشمعة
-            # نحسب SL أولًا — بشكل محافظ
-            # -------------------------------------------------
-
-            if hit_sl:
-
-                signal["result"] = "SL"
-
-                signal["result_time"] = (
-                    candle["time"]
-                )
-
-                state["stats"]["losses"] += 1
-                state["stats"]["sl"] += 1
-                state["stats"]["closed"] += 1
-
-                changed = True
-
-                break
-
-            if hit_tp2:
-
-                signal["result"] = "TP2"
-
-                signal["result_time"] = (
-                    candle["time"]
-                )
-
-                state["stats"]["wins"] += 1
-                state["stats"]["tp2"] += 1
-                state["stats"]["closed"] += 1
-
-                changed = True
-
-                break
-
-            if hit_tp1:
-
-                signal["result"] = "TP1"
-
-                signal["result_time"] = (
-                    candle["time"]
-                )
-
-                state["stats"]["wins"] += 1
-                state["stats"]["tp1"] += 1
-                state["stats"]["closed"] += 1
-
-                changed = True
-
-                break
-
-    state["signals"] = (
-        state["signals"]
-        [-MAX_OPEN_TRACKED:]
+    last = last_signal_time.get(
+        symbol
     )
 
-    if changed:
+    if last is None:
 
-        save_state(state)
+        return False
 
-
-# =========================================================
-# STATS
-# =========================================================
-
-def stats_text():
-
-    stats = state["stats"]
-
-    total = stats["closed"]
-
-    if total:
-
-        win_rate = (
-            stats["wins"]
-            /
-            total
-            *
-            100
-        )
-
-    else:
-
-        win_rate = 0
+    elapsed = (
+        time.time()
+        - last
+    )
 
     return (
-
-        "📊 XAU V6 Statistics\n\n"
-
-        f"Closed: {total}\n"
-
-        f"Wins: "
-        f"{stats['wins']}\n"
-
-        f"Losses: "
-        f"{stats['losses']}\n"
-
-        f"Win rate: "
-        f"{win_rate:.1f}%\n\n"
-
-        f"🎯 TP1: "
-        f"{stats['tp1']}\n"
-
-        f"🎯 TP2: "
-        f"{stats['tp2']}\n"
-
-        f"🛑 SL: "
-        f"{stats['sl']}"
+        elapsed
+        < COOLDOWN_MINUTES * 60
     )
 
 
 # =========================================================
-# MARKET CHECK
+# CHECK SYMBOL
 # =========================================================
 
-def check_market():
+def check_symbol(symbol):
 
     try:
 
         print(
-            f"[{datetime.now(timezone.utc).isoformat()}]"
-            " Checking XAUUSD..."
+            f"🔎 Checking {symbol}..."
         )
 
-        m15 = get_bars(
-            "15m",
-            300
+        # -------------------------------------------------
+        # السعر الحالي
+        # -------------------------------------------------
+
+        tick = get_tick(
+            symbol
         )
 
-        h1 = get_bars(
-            "1h",
-            250
-        )
-
-        update_tracked(
-            m15
-        )
-
-        quote = get_quote()
-
-        if not quote:
+        if not tick:
 
             print(
-                "Market closed or stale."
+                f"{symbol}: no tick"
             )
 
             return
 
-        signal = analyze(
+        market_state = (
+            tick.get(
+                "marketState"
+            )
+        )
+
+        if market_state != "open":
+
+            print(
+                f"{symbol}: market "
+                f"{market_state}"
+            )
+
+            return
+
+        if tick.get("stale"):
+
+            print(
+                f"{symbol}: stale price"
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Cooldown
+        # -------------------------------------------------
+
+        if is_in_cooldown(symbol):
+
+            print(
+                f"{symbol}: cooldown"
+            )
+
+            return
+
+        # -------------------------------------------------
+        # M15
+        # -------------------------------------------------
+
+        m15 = get_ohlc(
+            symbol,
+            M15_INTERVAL,
+            M15_BARS
+        )
+
+        # -------------------------------------------------
+        # H1
+        # -------------------------------------------------
+
+        h1 = get_ohlc(
+            symbol,
+            H1_INTERVAL,
+            H1_BARS
+        )
+
+        # -------------------------------------------------
+        # تحليل
+        # -------------------------------------------------
+
+        signal = analyze_symbol(
+            symbol,
             m15,
             h1
         )
@@ -1632,7 +1457,7 @@ def check_market():
         if not signal:
 
             print(
-                "⏳ No V6 signal."
+                f"{symbol}: no strong setup"
             )
 
             return
@@ -1641,150 +1466,142 @@ def check_market():
             signal["candle_time"]
         )
 
+        # -------------------------------------------------
+        # منع تكرار نفس الشمعة
+        # -------------------------------------------------
+
         if (
-            candle_time
-            ==
-            state.get(
-                "last_signal_candle"
-            )
+            last_signal_candle.get(symbol)
+            == candle_time
         ):
+
+            print(
+                f"{symbol}: "
+                "already sent"
+            )
 
             return
 
-        # -----------------------------------------------------
-        # COOLDOWN
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # إرسال Telegram
+        # -------------------------------------------------
 
-        if (
-            state.get(
-                "last_signal_candle"
+        if not TELEGRAM_CHAT_ID:
+
+            print(
+                "TELEGRAM_CHAT_ID missing"
             )
-            and
-            state.get(
-                "last_signal_direction"
-            )
-            ==
-            signal["direction"]
-        ):
 
-            closed = [
-                x for x in m15
-                if not x["isOpen"]
-            ]
-
-            times = [
-                x["time"]
-                for x in closed
-            ]
-
-            try:
-
-                a = times.index(
-                    state[
-                        "last_signal_candle"
-                    ]
-                )
-
-                b = times.index(
-                    candle_time
-                )
-
-                if (
-                    b - a
-                    <
-                    COOLDOWN_CANDLES
-                ):
-
-                    print(
-                        "Cooldown active."
-                    )
-
-                    return
-
-            except ValueError:
-
-                pass
-
-        # -----------------------------------------------------
-        # SEND
-        # -----------------------------------------------------
+            return
 
         message = format_signal(
             signal
         )
 
-        send_message(
+        result = send_message(
             TELEGRAM_CHAT_ID,
             message
         )
 
-        state[
-            "last_signal_candle"
-        ] = candle_time
+        if result.get("ok"):
 
-        state[
-            "last_signal_direction"
-        ] = signal["direction"]
+            last_signal_candle[
+                symbol
+            ] = candle_time
 
-        state["signals"].append(
-            signal
-        )
+            last_signal_time[
+                symbol
+            ] = time.time()
 
-        save_state(
-            state
-        )
-
-        print(
-            "🚨 V6 SIGNAL SENT:",
-            signal["direction"]
-        )
+            print(
+                f"🚨 {symbol} SIGNAL SENT"
+            )
 
     except Exception as e:
 
         print(
-            "❌ Market error:",
+            f"❌ {symbol} error:",
             repr(e)
         )
+
+
+# =========================================================
+# MARKET CHECK
+# =========================================================
+
+def check_market():
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        "📡 MARKET SCAN"
+    )
+
+    print(
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    print(
+        "================================"
+    )
+
+    for symbol in SYMBOLS:
+
+        check_symbol(
+            symbol
+        )
+
+        # تأخير بسيط بين الرموز
+        time.sleep(0.3)
 
 
 # =========================================================
 # TELEGRAM COMMANDS
 # =========================================================
 
-def handle_message(
-    message
-):
+def handle_message(message):
 
-    chat_id = (
-        message["chat"]["id"]
-    )
+    chat_id = message["chat"]["id"]
 
     text = (
         message
         .get("text", "")
         .strip()
+        .lower()
     )
+
+    # -----------------------------------------------------
+    # START
+    # -----------------------------------------------------
 
     if text == "/start":
 
         send_message(
             chat_id,
 
-            "👋 XAU Gold Signals V6\n\n"
+            "👋 XAU Forex Signals\n\n"
 
-            "🛡️ استراتيجية محافظة\n"
-
-            "📡 Data Source: BiQuote\n"
+            "🟢 البوت يعمل.\n\n"
 
             "🥇 XAUUSD\n"
+            "💱 Forex pairs\n\n"
 
-            "📊 M15 + H1\n\n"
+            "📊 M15 + H1\n"
+            "🧠 Multi-filter strategy\n"
+            "🛡 Risk filtering\n\n"
 
-            "/test - اختبار\n"
-            "/signal - تحليل الآن\n"
-            "/status - الحالة\n"
-            "/stats - النتائج"
+            "/test\n"
+            "/signal\n"
+            "/status"
         )
+
+    # -----------------------------------------------------
+    # TEST
+    # -----------------------------------------------------
 
     elif text == "/test":
 
@@ -1792,97 +1609,140 @@ def handle_message(
             chat_id,
 
             "✅ TEST SUCCESS\n\n"
-
-            "🟢 Data Source: BiQuote\n"
-
-            "🥇 Symbol: XAUUSD\n"
-
-            "📊 Timeframe: M15 + H1\n"
-
-            "🛡️ Strategy: V6 Conservative\n\n"
-
-            "⚠️ هذا اختبار فقط "
-            "وليس إشارة حقيقية."
+            "Telegram يعمل بشكل صحيح.\n"
+            "BiQuote هو مصدر البيانات."
         )
+
+    # -----------------------------------------------------
+    # SIGNAL
+    # -----------------------------------------------------
 
     elif text == "/signal":
 
-        try:
+        send_message(
+            chat_id,
 
-            m15 = get_bars(
-                "15m",
-                300
-            )
+            "🔎 جاري فحص XAUUSD وForex..."
+        )
 
-            h1 = get_bars(
-                "1h",
-                250
-            )
+        found = 0
 
-            quote = get_quote()
+        for symbol in SYMBOLS:
 
-            signal = (
-                analyze(m15, h1)
-                if quote
-                else None
-            )
+            try:
 
-            if signal:
+                tick = get_tick(
+                    symbol
+                )
 
-                send_message(
-                    chat_id,
-                    format_signal(
-                        signal
+                if not tick:
+
+                    continue
+
+                if (
+                    tick.get(
+                        "marketState"
                     )
+                    != "open"
+                ):
+
+                    continue
+
+                m15 = get_ohlc(
+                    symbol,
+                    M15_INTERVAL,
+                    M15_BARS
                 )
 
-            else:
-
-                send_message(
-                    chat_id,
-
-                    "⏳ لا توجد إشارة "
-                    "V6 قوية الآن.\n\n"
-
-                    "🛡️ لن نفتح صفقة إجبارية."
+                h1 = get_ohlc(
+                    symbol,
+                    H1_INTERVAL,
+                    H1_BARS
                 )
 
-        except Exception as e:
+                signal = analyze_symbol(
+                    symbol,
+                    m15,
+                    h1
+                )
+
+                if signal:
+
+                    send_message(
+                        chat_id,
+                        format_signal(
+                            signal
+                        )
+                    )
+
+                    found += 1
+
+            except Exception as e:
+
+                print(
+                    f"/signal {symbol}:",
+                    repr(e)
+                )
+
+        if found == 0:
 
             send_message(
                 chat_id,
 
-                "❌ تعذر التحليل:\n"
-                f"{e}"
+                "⏳ لا توجد حاليًا "
+                "إشارة قوية تستوفي كل الفلاتر.\n\n"
+
+                "وهذا مقصود.\n"
+                "لن نرسل صفقة إجبارية."
             )
+
+    # -----------------------------------------------------
+    # STATUS
+    # -----------------------------------------------------
 
     elif text == "/status":
 
+        active = []
+
+        for symbol in SYMBOLS:
+
+            try:
+
+                tick = get_tick(
+                    symbol
+                )
+
+                if tick:
+
+                    state = tick.get(
+                        "marketState",
+                        "unknown"
+                    )
+
+                    active.append(
+                        f"{symbol}: {state}"
+                    )
+
+            except:
+
+                active.append(
+                    f"{symbol}: error"
+                )
+
         send_message(
             chat_id,
 
-            "🟢 البوت يعمل\n\n"
+            "🟢 BOT STATUS\n\n"
 
             "📡 BiQuote: ON\n"
 
-            "🥇 XAUUSD\n"
+            "⏱ Scan: 60 seconds\n"
 
             "📊 M15 + H1\n"
 
-            "⏱ الفحص: كل 60 ثانية\n\n"
+            "🛡 Strong filtering: ON\n\n"
 
-            "🕯 آخر إشارة:\n"
-
-            f"{state.get('last_signal_candle') or 'لا يوجد'}\n\n"
-
-            + stats_text()
-        )
-
-    elif text == "/stats":
-
-        send_message(
-            chat_id,
-            stats_text()
+            + "\n".join(active)
         )
 
     else:
@@ -1890,11 +1750,12 @@ def handle_message(
         send_message(
             chat_id,
 
+            "الأوامر:\n\n"
+
             "/start\n"
             "/test\n"
             "/signal\n"
-            "/status\n"
-            "/stats"
+            "/status"
         )
 
 
@@ -1902,7 +1763,7 @@ def handle_message(
 # TELEGRAM POLLING
 # =========================================================
 
-def process_updates(
+def process_telegram_updates(
     offset
 ):
 
@@ -1911,12 +1772,8 @@ def process_updates(
         result = telegram(
             "getUpdates",
             {
-                "timeout":
-                    5,
-
-                "offset":
-                    offset,
-
+                "timeout": 5,
+                "offset": offset,
                 "allowed_updates":
                     json.dumps(
                         ["message"]
@@ -1939,10 +1796,8 @@ def process_updates(
                 + 1
             )
 
-            message = (
-                update.get(
-                    "message"
-                )
+            message = update.get(
+                "message"
             )
 
             if message:
@@ -1956,7 +1811,7 @@ def process_updates(
                 except Exception as e:
 
                     print(
-                        "Handler error:",
+                        "Message error:",
                         repr(e)
                     )
 
@@ -1967,15 +1822,14 @@ def process_updates(
         text = str(e)
 
         if (
-            "409"
-            in text
-            or
-            "Conflict"
-            in text
+            "409" in text
+            or "Conflict" in text
         ):
 
             print(
-                "❌ Telegram 409 Conflict"
+                "❌ TELEGRAM 409:"
+                " another instance "
+                "is using getUpdates."
             )
 
             time.sleep(10)
@@ -2003,30 +1857,87 @@ def main():
     )
 
     print(
-        "XAU Gold Signals Bot V6"
+        "XAU Forex Signals - FINAL"
     )
 
     print(
-        "BiQuote + M15 + H1"
+        "BiQuote FREE DATA"
     )
 
     print(
-        "Conservative Strategy"
+        "M15 + H1"
     )
 
     print(
-        "Check every:",
+        "Multi-filter strategy"
+    )
+
+    print(
+        "Scan:",
         CHECK_SECONDS,
         "seconds"
+    )
+
+    print(
+        "Symbols:",
+        len(SYMBOLS)
     )
 
     print(
         "================================"
     )
 
-    check_telegram()
+    # -----------------------------------------------------
+    # Telegram
+    # -----------------------------------------------------
 
-    delete_webhook()
+    try:
+
+        check_telegram()
+
+        clear_webhook()
+
+    except Exception as e:
+
+        print(
+            "❌ Telegram startup:",
+            repr(e)
+        )
+
+    # -----------------------------------------------------
+    # اختبار BiQuote
+    # -----------------------------------------------------
+
+    try:
+
+        tick = get_tick(
+            "XAUUSD"
+        )
+
+        if tick:
+
+            print(
+                "✅ BiQuote XAUUSD:",
+                tick.get("mid")
+            )
+
+            print(
+                "Market:",
+                tick.get(
+                    "marketState"
+                )
+            )
+
+    except Exception as e:
+
+        print(
+            "❌ BiQuote startup:",
+            repr(e)
+        )
+
+    # -----------------------------------------------------
+    # Main loop
+    # -----------------------------------------------------
 
     offset = None
 
@@ -2036,18 +1947,18 @@ def main():
 
         try:
 
-            offset = process_updates(
-                offset
+            offset = (
+                process_telegram_updates(
+                    offset
+                )
             )
 
             now = time.time()
 
             if (
                 now
-                -
-                last_market_check
-                >=
-                CHECK_SECONDS
+                - last_market_check
+                >= CHECK_SECONDS
             ):
 
                 last_market_check = now
@@ -2067,7 +1978,7 @@ def main():
         except Exception as e:
 
             print(
-                "❌ Main loop error:",
+                "❌ Main loop:",
                 repr(e)
             )
 
