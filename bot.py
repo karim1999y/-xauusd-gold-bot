@@ -19,15 +19,10 @@ if not TELEGRAM_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 BIQUOTE_BASE = "https://biquote.io/api"
 
-CHECK_SECONDS = 30 
+CHECK_SECONDS = 20  # فحص كل 20 ثانية لتتبع حركة البتكوين اللحظية
 
-SYMBOLS = [
-    "EURUSD",
-    "GBPUSD",
-    "USDJPY",
-    "AUDUSD",
-    "USDCAD",
-]
+# الاعتماد حصراً على البتكوين
+SYMBOL = "BTCUSDT"
 
 ENTRY_INTERVAL = "5m"
 TREND_INTERVAL = "15m"
@@ -36,29 +31,28 @@ ENTRY_BARS = 200
 TREND_BARS = 200
 
 MIN_SCORE = 5
-MIN_RR = 1.3
-TP1_R_MULTIPLIER = 1.3
-TP2_R_MULTIPLIER = 2.0
-SL_ATR_MULTIPLIER = 1.1
 
-COOLDOWN_MINUTES = 20
+# إدارة المخاطر مخصصة للبتكوين
+TP1_R_MULTIPLIER = 1.4
+TP2_R_MULTIPLIER = 2.2
+SL_ATR_MULTIPLIER = 1.4
 
-BUY_RSI_MIN = 45
-BUY_RSI_MAX = 65
-SELL_RSI_MIN = 35
-SELL_RSI_MAX = 55
+COOLDOWN_MINUTES = 15  # مهلة 15 دقيقة بين كل صفقة بتكوين وأخرى
+
+BUY_RSI_MIN = 48
+BUY_RSI_MAX = 68
+SELL_RSI_MIN = 32
+SELL_RSI_MAX = 52
 
 # =========================================================
-# GLOBAL TRACKING STATE
+# TRACKING STATE
 # =========================================================
 
-last_signal_candle = {}
-last_signal_time = {}
+last_signal_candle = None
+last_signal_time = 0
 
-# قائمة الصفقات المفتوحة للمراقبة
 active_trades = []
 
-# سجل النتائج الإحصائية
 stats = {
     "wins": 0,
     "losses": 0,
@@ -72,7 +66,7 @@ stats = {
 def get_json(url, timeout=15):
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Scalper-Bot/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "BTC-Scalper/1.0", "Accept": "application/json"},
         method="GET",
     )
     try:
@@ -84,7 +78,7 @@ def get_json(url, timeout=15):
 def telegram(method, data=None, timeout=5):
     url = f"{TELEGRAM_API}/{method}"
     encoded = urllib.parse.urlencode({k: v for k, v in data.items() if v is not None}).encode("utf-8") if data else None
-    req = urllib.request.Request(url, data=encoded, headers={"User-Agent": "Scalper-Bot/1.0"}, method="POST" if encoded else "GET")
+    req = urllib.request.Request(url, data=encoded, headers={"User-Agent": "BTC-Scalper/1.0"}, method="POST" if encoded else "GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
@@ -92,7 +86,7 @@ def send_message(chat_id, text):
     return telegram("sendMessage", {"chat_id": str(chat_id), "text": text})
 
 # =========================================================
-# MARKET DATA
+# MARKET DATA & INDICATORS
 # =========================================================
 
 def get_ohlc(symbol, interval, limit):
@@ -118,13 +112,8 @@ def get_ohlc(symbol, interval, limit):
 def get_tick(symbol):
     return get_json(f"{BIQUOTE_BASE}/{symbol}")
 
-# =========================================================
-# INDICATORS
-# =========================================================
-
 def ema_series(values, period):
-    if len(values) < period:
-        return []
+    if len(values) < period: return []
     mult = 2 / (period + 1)
     val = sum(values[:period]) / period
     out = [None] * (period - 1) + [val]
@@ -138,8 +127,7 @@ def ema(values, period):
     return s[-1] if s else None
 
 def rsi(values, period=14):
-    if len(values) < period + 1:
-        return None
+    if len(values) < period + 1: return None
     gains, losses = [], []
     for i in range(1, len(values)):
         chg = values[i] - values[i - 1]
@@ -162,7 +150,7 @@ def atr(candles, period=14):
     return sum(trs[-period:]) / period
 
 # =========================================================
-# ANALYSIS & TRACKING LOGIC
+# BTC ANALYSIS
 # =========================================================
 
 def get_m15_trend(candles):
@@ -174,7 +162,7 @@ def get_m15_trend(candles):
     if e20 < e50: return "BEAR"
     return "NEUTRAL"
 
-def analyze_scalp(symbol, m5, m15):
+def analyze_btc(m5, m15):
     m15_trend = get_m15_trend(m15)
     if m15_trend == "NEUTRAL":
         return None
@@ -201,33 +189,35 @@ def analyze_scalp(symbol, m5, m15):
     buy_score, sell_score = 0, 0
     buy_reasons, sell_reasons = [], []
 
+    # BUY (LONG)
     if m15_trend == "BULL":
         buy_score += 2
-        buy_reasons.append("M15 Trend: Bullish")
+        buy_reasons.append("M15 Trend: Bullish 🚀")
 
     if e9 > e21:
         buy_score += 1
-        buy_reasons.append("M5 EMA9 > EMA21")
+        buy_reasons.append("M5 EMA9 > EMA21 Cross")
 
     if BUY_RSI_MIN <= curr_rsi <= BUY_RSI_MAX:
         buy_score += 1
-        buy_reasons.append(f"M5 RSI Momentum ({curr_rsi:.1f})")
+        buy_reasons.append(f"M5 RSI Bullish Momentum ({curr_rsi:.1f})")
 
     if candle["close"] > prev["high"]:
         buy_score += 1
         buy_reasons.append("M5 Candle Breakout")
 
+    # SELL (SHORT)
     if m15_trend == "BEAR":
         sell_score += 2
-        sell_reasons.append("M15 Trend: Bearish")
+        sell_reasons.append("M15 Trend: Bearish 📉")
 
     if e9 < e21:
         sell_score += 1
-        sell_reasons.append("M5 EMA9 < EMA21")
+        sell_reasons.append("M5 EMA9 < EMA21 Cross")
 
     if SELL_RSI_MIN <= curr_rsi <= SELL_RSI_MAX:
         sell_score += 1
-        sell_reasons.append(f"M5 RSI Momentum ({curr_rsi:.1f})")
+        sell_reasons.append(f"M5 RSI Bearish Momentum ({curr_rsi:.1f})")
 
     if candle["close"] < prev["low"]:
         sell_score += 1
@@ -255,7 +245,7 @@ def analyze_scalp(symbol, m5, m15):
         tp2 = price - (risk * TP2_R_MULTIPLIER)
 
     return {
-        "symbol": symbol,
+        "symbol": SYMBOL,
         "direction": direction,
         "entry": price,
         "sl": sl,
@@ -269,117 +259,54 @@ def analyze_scalp(symbol, m5, m15):
     }
 
 # =========================================================
-# TRADE TRACKER SYSTEM
+# MONITORING & COMMANDS
 # =========================================================
 
-def monitor_active_trades():
-    """مراقبة الصفقات المفتوحة ومعرفة هل حققت الهدف أو ضربت الستوب"""
+def monitor_btc_trade():
     global active_trades, stats
-
     to_remove = []
     for trade in active_trades:
-        symbol = trade["symbol"]
-        tick = get_tick(symbol)
-        if not tick:
-            continue
+        tick = get_tick(SYMBOL)
+        if not tick: continue
 
         price = float(tick.get("mid", tick.get("bid", 0)))
-        if price == 0:
-            continue
+        if price == 0: continue
 
         direction = trade["direction"]
         sl = trade["sl"]
         tp1 = trade["tp1"]
 
-        digits = 3 if symbol.endswith("JPY") else 5
-
-        # فحص حركة الشراء
         if direction == "BUY":
             if price >= tp1:
                 stats["wins"] += 1
                 stats["total"] += 1
                 win_rate = (stats["wins"] / stats["total"]) * 100
-                msg = (
-                    f"🎯 **صفقة رابحة! (TP Hit)**\n\n"
-                    f"💱 الرمز: {symbol}\n"
-                    f"🟢 الاتجاه: شراء (BUY)\n"
-                    f"📍 سعر الدخول: {trade['entry']:.{digits}f}\n"
-                    f"✅ سعر الهدف: {tp1:.{digits}f}\n\n"
-                    f"📊 **إحصائيات الإشارات:**\n"
-                    f"• الناجحة: {stats['wins']} 🟢\n"
-                    f"• الخاسرة: {stats['losses']} 🔴\n"
-                    f"• نسبة النجاح: {win_rate:.1f}%"
-                )
-                if TELEGRAM_CHAT_ID:
-                    send_message(TELEGRAM_CHAT_ID, msg)
+                send_message(TELEGRAM_CHAT_ID, f"🎯 **BITCOIN TP HIT!**\n\n🪙 BTCUSDT (LONG)\n📍 Entry: {trade['entry']:.2f}\n✅ Target: {tp1:.2f}\n\n📊 Win Rate: {win_rate:.1f}% ({stats['wins']}/{stats['total']})")
                 to_remove.append(trade)
-
             elif price <= sl:
                 stats["losses"] += 1
                 stats["total"] += 1
                 win_rate = (stats["wins"] / stats["total"]) * 100
-                msg = (
-                    f"🔴 **صفقة خاسرة! (SL Hit)**\n\n"
-                    f"💱 الرمز: {symbol}\n"
-                    f"🔴 الاتجاه: شراء (BUY)\n"
-                    f"📍 سعر الدخول: {trade['entry']:.{digits}f}\n"
-                    f"🛑 سعر الستوب: {sl:.{digits}f}\n\n"
-                    f"📊 **إحصائيات الإشارات:**\n"
-                    f"• الناجحة: {stats['wins']} 🟢\n"
-                    f"• الخاسرة: {stats['losses']} 🔴\n"
-                    f"• نسبة النجاح: {win_rate:.1f}%"
-                )
-                if TELEGRAM_CHAT_ID:
-                    send_message(TELEGRAM_CHAT_ID, msg)
+                send_message(TELEGRAM_CHAT_ID, f"🔴 **BITCOIN SL HIT!**\n\n🪙 BTCUSDT (LONG)\n📍 Entry: {trade['entry']:.2f}\n🛑 Stop: {sl:.2f}\n\n📊 Win Rate: {win_rate:.1f}% ({stats['wins']}/{stats['total']})")
                 to_remove.append(trade)
 
-        # فحص حركة البيع
         elif direction == "SELL":
             if price <= tp1:
                 stats["wins"] += 1
                 stats["total"] += 1
                 win_rate = (stats["wins"] / stats["total"]) * 100
-                msg = (
-                    f"🎯 **صفقة رابحة! (TP Hit)**\n\n"
-                    f"💱 الرمز: {symbol}\n"
-                    f"🔴 الاتجاه: بيع (SELL)\n"
-                    f"📍 سعر الدخول: {trade['entry']:.{digits}f}\n"
-                    f"✅ سعر الهدف: {tp1:.{digits}f}\n\n"
-                    f"📊 **إحصائيات الإشارات:**\n"
-                    f"• الناجحة: {stats['wins']} 🟢\n"
-                    f"• الخاسرة: {stats['losses']} 🔴\n"
-                    f"• نسبة النجاح: {win_rate:.1f}%"
-                )
-                if TELEGRAM_CHAT_ID:
-                    send_message(TELEGRAM_CHAT_ID, msg)
+                send_message(TELEGRAM_CHAT_ID, f"🎯 **BITCOIN TP HIT!**\n\n🪙 BTCUSDT (SHORT)\n📍 Entry: {trade['entry']:.2f}\n✅ Target: {tp1:.2f}\n\n📊 Win Rate: {win_rate:.1f}% ({stats['wins']}/{stats['total']})")
                 to_remove.append(trade)
-
             elif price >= sl:
                 stats["losses"] += 1
                 stats["total"] += 1
                 win_rate = (stats["wins"] / stats["total"]) * 100
-                msg = (
-                    f"🔴 **صفقة خاسرة! (SL Hit)**\n\n"
-                    f"💱 الرمز: {symbol}\n"
-                    f"🔴 الاتجاه: بيع (SELL)\n"
-                    f"📍 سعر الدخول: {trade['entry']:.{digits}f}\n"
-                    f"🛑 سعر الستوب: {sl:.{digits}f}\n\n"
-                    f"📊 **إحصائيات الإشارات:**\n"
-                    f"• الناجحة: {stats['wins']} 🟢\n"
-                    f"• الخاسرة: {stats['losses']} 🔴\n"
-                    f"• نسبة النجاح: {win_rate:.1f}%"
-                )
-                if TELEGRAM_CHAT_ID:
-                    send_message(TELEGRAM_CHAT_ID, msg)
+                send_message(TELEGRAM_CHAT_ID, f"🔴 **BITCOIN SL HIT!**\n\n🪙 BTCUSDT (SHORT)\n📍 Entry: {trade['entry']:.2f}\n🛑 Stop: {sl:.2f}\n\n📊 Win Rate: {win_rate:.1f}% ({stats['wins']}/{stats['total']})")
                 to_remove.append(trade)
 
     for item in to_remove:
         if item in active_trades:
             active_trades.remove(item)
-
-# =========================================================
-# TELEGRAM COMMANDS
-# =========================================================
 
 def handle_message(message):
     chat_id = message["chat"]["id"]
@@ -389,15 +316,13 @@ def handle_message(message):
         win_rate = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
         send_message(
             chat_id,
-            f"📊 **تقرير أداء الإشارات الحالية:**\n\n"
-            f"✅ الصفقات الناجحة: {stats['wins']}\n"
-            f"❌ الصفقات الخاسرة: {stats['losses']}\n"
-            f"📈 إجمالي الصفقات: {stats['total']}\n"
+            f"⚡ **تقرير أداء إشارات البتكوين (BTC):**\n\n"
+            f"🟢 الناجحة: {stats['wins']}\n"
+            f"🔴 الخاسرة: {stats['losses']}\n"
+            f"📊 الإجمالي: {stats['total']}\n"
             f"🎯 نسبة النجاح: {win_rate:.1f}%\n"
             f"⏳ صفقات قيد التتبع: {len(active_trades)}"
         )
-    elif text == "/start":
-        send_message(chat_id, "👋 البوت يعمل بنظام السكالبينج وتتبع الصفقات التلقائي.\n\nاستخدم /stats لمشاهدة النتائج.")
 
 def process_telegram_updates(offset):
     try:
@@ -412,68 +337,60 @@ def process_telegram_updates(offset):
         return offset
 
 # =========================================================
-# SCANNER & MAIN LOOP
+# MAIN LOOP
 # =========================================================
 
-def format_scalp_signal(sig):
-    sym = sig["symbol"]
-    side = "⚡ SCALP BUY 🟢" if sig["direction"] == "BUY" else "⚡ SCALP SELL 🔴"
-    digits = 3 if sym.endswith("JPY") else 5
+def format_btc_signal(sig):
+    side = "⚡ BTC LONG 🟢" if sig["direction"] == "BUY" else "⚡ BTC SHORT 🔴"
     reasons = "\n".join([f"• {r}" for r in sig["reasons"]])
 
     return (
         f"{side}\n"
-        f"💱 الرمز: {sym} (فريم 5 دقائق)\n\n"
-        f"📍 الدخول: {sig['entry']:.{digits}f}\n"
-        f"🛑 SL: {sig['sl']:.{digits}f}\n"
-        f"🎯 TP1: {sig['tp1']:.{digits}f}\n"
-        f"🎯 TP2: {sig['tp2']:.{digits}f}\n\n"
-        f"📊 RSI: {sig['rsi']:.1f} | ATR: {sig['atr']:.{digits}f}\n"
+        f"💱 الرمز: BTCUSDT (فريم 5 دقائق)\n\n"
+        f"📍 سعر الدخول: {sig['entry']:.2f}\n"
+        f"🛑 SL: {sig['sl']:.2f}\n"
+        f"🎯 TP1: {sig['tp1']:.2f}\n"
+        f"🎯 TP2: {sig['tp2']:.2f}\n\n"
+        f"📊 RSI: {sig['rsi']:.1f} | ATR: {sig['atr']:.2f}\n"
         f"⭐ Score: {sig['score']}/5\n\n"
         f"🔎 الأسباب:\n{reasons}\n\n"
-        f"⚠️ تذكر: لُوت 0.01 فقط للحفاظ على رأس مالك!"
+        f"⚠️ تذكرة لحساب 43€: الرافعة المالية 3X - 5X كحد أقصى والدخول بـ 4€ إلى 5€ للصفقة."
     )
 
-def check_scalp():
-    for symbol in SYMBOLS:
-        try:
-            tick = get_tick(symbol)
-            if not tick or tick.get("marketState") != "open":
-                continue
+def check_btc():
+    global last_signal_candle, last_signal_time
+    try:
+        tick = get_tick(SYMBOL)
+        if not tick: return
 
-            last_t = last_signal_time.get(symbol)
-            if last_t and (time.time() - last_t) < (COOLDOWN_MINUTES * 60):
-                continue
+        if last_signal_time and (time.time() - last_signal_time) < (COOLDOWN_MINUTES * 60):
+            return
 
-            m5 = get_ohlc(symbol, ENTRY_INTERVAL, ENTRY_BARS)
-            m15 = get_ohlc(symbol, TREND_INTERVAL, TREND_BARS)
+        m5 = get_ohlc(SYMBOL, ENTRY_INTERVAL, ENTRY_BARS)
+        m15 = get_ohlc(SYMBOL, TREND_INTERVAL, TREND_BARS)
 
-            sig = analyze_scalp(symbol, m5, m15)
-            if sig:
-                if last_signal_candle.get(symbol) == sig["candle_time"]:
-                    continue
+        sig = analyze_btc(m5, m15)
+        if sig:
+            if last_signal_candle == sig["candle_time"]:
+                return
 
-                if TELEGRAM_CHAT_ID:
-                    send_message(TELEGRAM_CHAT_ID, format_scalp_signal(sig))
-                    
-                    # إضافة الصفقة لقائمة التتبع المباشر
-                    active_trades.append({
-                        "symbol": sig["symbol"],
-                        "direction": sig["direction"],
-                        "entry": sig["entry"],
-                        "sl": sig["sl"],
-                        "tp1": sig["tp1"],
-                    })
+            if TELEGRAM_CHAT_ID:
+                send_message(TELEGRAM_CHAT_ID, format_btc_signal(sig))
+                active_trades.append({
+                    "direction": sig["direction"],
+                    "entry": sig["entry"],
+                    "sl": sig["sl"],
+                    "tp1": sig["tp1"],
+                })
+                last_signal_candle = sig["candle_time"]
+                last_signal_time = time.time()
+                print("⚡ BTC SIGNAL SENT!")
 
-                    last_signal_candle[symbol] = sig["candle_time"]
-                    last_signal_time[symbol] = time.time()
-                    print(f"⚡ SCALPING SIGNAL SENT: {symbol}")
-
-        except Exception as e:
-            print(f"Error {symbol}:", e)
+    except Exception as e:
+        print("Error checking BTC:", e)
 
 if __name__ == "__main__":
-    print("🚀 SCALPING BOT WITH TRADE TRACKING STARTED...")
+    print("🚀 BTC ONLY SCALPER STARTED...")
     last_check = 0
     offset = None
     while True:
@@ -482,8 +399,8 @@ if __name__ == "__main__":
             now = time.time()
             if now - last_check >= CHECK_SECONDS:
                 last_check = now
-                check_scalp()
-                monitor_active_trades()  # مراقبة أداء الصفقات الحالية
+                check_btc()
+                monitor_btc_trade()
 
             time.sleep(1)
         except KeyboardInterrupt:
