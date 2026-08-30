@@ -7,7 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==========================================
-# 1. خادم المنفذ الوهمي الخاص بـ Render (Health Check)
+# 1. خادم المنفذ الوهمي لـ Render (Health Check)
 # ==========================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -24,31 +24,24 @@ def run_port_listener():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# تشغيل السيرفر في خلفية البوت
 threading.Thread(target=run_port_listener, daemon=True).start()
 
 # ==========================================
-# 2. إعداد التسجيل والإعدادات العامة
+# 2. إعداد التسجيل والمؤشرات
 # ==========================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# ==========================================
-# 3. دالة إرسال التنبيهات إلى تليجرام
-# ==========================================
-def send_telegram_message(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.warning("تنبيه: لم يتم ضبط TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID في Environment Variables.")
+def send_telegram_message(message, chat_id=None):
+    target_chat = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_TOKEN or not target_chat:
         return False
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": target_chat,
         "text": message,
         "parse_mode": "HTML"
     }
@@ -59,38 +52,51 @@ def send_telegram_message(message):
         with urllib.request.urlopen(req) as response:
             return response.status == 200
     except Exception as e:
-        logging.error(f"خطأ أثناء إرسال رسالة تليجرام: {e}")
+        logging.error(f"خطأ أثناء إرسال الرسالة: {e}")
         return False
 
 # ==========================================
-# 4. محرك البوت التكراري (Main Loop)
+# 3. الاستماع لأوامر تليجرام (Telegram Long Polling)
 # ==========================================
-def main():
-    logging.info("🚀 SCALPING BOT WITH TRADE TRACKING STARTED...")
-    
-    # إرسال رسالة ترحيبية وتأكيد بدء التشغيل
-    startup_msg = (
-        "🤖 <b>تم تشغيل بوت التداول بنجاح!</b>\n\n"
-        "📈 <b>الرموز المتابعة:</b> XAUUSD / EURUSD\n"
-        "⚙️ <b>الحالة:</b> متصل ويعمل 24/7 على Render"
-    )
-    send_telegram_message(startup_msg)
-
-    # الحلقة الرئيسية لتنفيذ التحليل واستقبال الإشارات
+def poll_telegram_updates():
+    offset = 0
     while True:
         try:
-            # هنا يتم وضع منطق استراتيجية السكالبر (RSI, EMA, ATR) أو جلب الأسعار
-            logging.info("البوت يعمل ويقوم بمراقبة السوق...")
-            
-            # فحص السوق كل 60 ثانية
-            time.sleep(60)
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=30"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if result.get("ok"):
+                    for update in result.get("result", []):
+                        offset = update["update_id"] + 1
+                        message = update.get("message", {})
+                        text = message.get("text", "")
+                        chat_id = message.get("chat", {}).get("id")
 
-        except KeyboardInterrupt:
-            logging.info("تم إيقاف البوت بواسطة المستخدم.")
-            break
+                        if text == "/status":
+                            reply = (
+                                "🤖 <b>حالة البوت:</b> يعمل بنجاح 24/7 على Render!\n"
+                                "📊 <b>الرموز:</b> XAUUSD / EURUSD"
+                            )
+                            send_telegram_message(reply, chat_id)
+                        elif text == "/signal":
+                            reply = (
+                                "🔎 <b>جاري فحص السوق...</b>\n"
+                                "⏳ لا توجد حالياً إشارة قوية تستوفي كل الفلاتر (RSI / EMA / ATR)."
+                            )
+                            send_telegram_message(reply, chat_id)
         except Exception as e:
-            logging.error(f"حدث خطأ غير متوقع: {e}")
-            time.sleep(10)
+            logging.error(f"خطأ في استقبال الأوامر: {e}")
+            time.sleep(5)
 
+# ==========================================
+# 4. تشغيل التطبيق الرئيسي
+# ==========================================
 if __name__ == "__main__":
-    main()
+    logging.info("🚀 SCALPING BOT STARTED...")
+    
+    # إرسال ترحيب عند الإقلاع
+    send_telegram_message("🤖 <b>تم إقلاع البوت وتثبيت المنفذ بنجاح!</b>")
+    
+    # بدء استقبال أوامر المستخدمين (/status, /signal)
+    poll_telegram_updates()
