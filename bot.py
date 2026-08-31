@@ -1,5 +1,6 @@
 import datetime
 import os
+import time
 from threading import Thread
 from flask import Flask
 import requests
@@ -82,6 +83,11 @@ def signal(msg):
   bot.send_message(msg.chat.id, text, parse_mode='Markdown')
 
 
-# 3. تشغيل استماع البوت لأوامر التليجرام
+# 3. تشغيل استماع البوت وتنظيف الاتصالات القديمة لتفادي خطأ 409
 if __name__ == '__main__':
-  bot.infinity_polling()
+  # مسح أي اتصالات معلقة أو جلسات سابقة
+  bot.remove_webhook()
+  time.sleep(1)
+
+  # البدء في الاستماع وتخطي الطلبات المعلقة القديمة
+  bot.infinity_polling(skip_pending=True)
