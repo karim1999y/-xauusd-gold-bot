@@ -1,13 +1,33 @@
 import datetime
 import os
+from threading import Thread
+from flask import Flask
 import telebot
 import yfinance as yf
 
+# --- 1. سيرفر وهمي لإرضاء Render في الخطة المجانية Web Service ---
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+  return "Bot is Alive Free 24/7!"
+
+
+def run_web_server():
+  port = int(os.environ.get("PORT", 8080))
+  app.run(host="0.0.0.0", port=port)
+
+
+# تشغيل السيرفر في خلفية الكود
+t = Thread(target=run_web_server)
+t.start()
+
+# --- 2. إعدادات بوت التليجرام والسكالبينج ---
 TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 bot = telebot.TeleBot(TOKEN)
 
 
-# دالة حساب مؤشر RSI
 def calculate_rsi(data, window=14):
   delta = data["Close"].diff()
   gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -16,16 +36,12 @@ def calculate_rsi(data, window=14):
   return 100 - (100 / (1 + rs))
 
 
-# دالة تحليل السكالبينج (EMA + RSI)
 def analyze_scalping(symbol_ticker, symbol_name):
   try:
-    # جلب بيانات فريم 5 دقائق
     df = yf.download(tickers=symbol_ticker, period="1d", interval="5m")
-
     if df.empty or len(df) < 20:
-      return f"❌ لا تتوفر سيولة أو بيانات كافية لـ {symbol_name} حالياً."
+      return f"❌ لا تتوفر سيولة كافية لـ {symbol_name} حالياً."
 
-    # حساب المؤشرات الفنية
     df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["EMA_21"] = df["Close"].ewm(span=21, adjust=False).mean()
     df["RSI"] = calculate_rsi(df, window=14)
@@ -35,7 +51,6 @@ def analyze_scalping(symbol_ticker, symbol_name):
     ema_21 = float(df["EMA_21"].iloc[-1])
     rsi = float(df["RSI"].iloc[-1])
 
-    # استراتيجية السكالبينج
     action = None
     if ema_9 > ema_21 and rsi > 50:
       action = "BUY"
@@ -43,7 +58,6 @@ def analyze_scalping(symbol_ticker, symbol_name):
       action = "SELL"
 
     if action:
-      # حساب الأهداف ووقف الخسارة للسكالبينج (نقاط سريعة)
       pip_unit = 0.1 if "GC=F" in symbol_ticker else 0.0001
       sl = (
           last_close - (15 * pip_unit)
@@ -56,7 +70,7 @@ def analyze_scalping(symbol_ticker, symbol_name):
           else last_close - (30 * pip_unit)
       )
 
-      msg = (
+      return (
           f"⚡ **إشارة سكالبينج جديدة ({symbol_name})** ⚡\n"
           f"----------------------------------\n"
           f"🎯 الأمر: **{action}**\n"
@@ -67,25 +81,24 @@ def analyze_scalping(symbol_ticker, symbol_name):
           f"----------------------------------\n"
           f"⏱ {datetime.datetime.now().strftime('%H:%M:%S')}"
       )
-      return msg
     else:
-      return f"⏳ السوق في حالة تذبذب لـ {symbol_name}، لا توجد فرصة سكالبينج واضحة الآن (RSI: {rsi:.1f})."
+      return f"⏳ السوق في حالة تذبذب لـ {symbol_name} (RSI: {rsi:.1f})."
 
   except Exception as e:
-    return f"❌ خطأ أثناء تحليل السكالبينج: {str(e)}"
+    return f"❌ خطأ في التحليل: {str(e)}"
 
 
 @bot.message_handler(commands=["start"])
 def start(message):
   bot.reply_to(
       message,
-      "🤖 بوت السكالبينج جاهز!\nأرسل /signal للحصول على صفقة سكالبينج حية.",
+      "🤖 بوت السكالبينج المجاني جاهز!\nأرسل /signal للحصول على إشارة.",
   )
 
 
 @bot.message_handler(commands=["status"])
 def status(message):
-  bot.reply_to(message, "🟢 بوت السكالبينج متصل 24/7 ومربوط بالتحليل الفني!")
+  bot.reply_to(message, "🟢 حالة البوت: شغال ومجاني 100% على Render!")
 
 
 @bot.message_handler(commands=["signal"])
