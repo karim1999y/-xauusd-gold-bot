@@ -1,100 +1,70 @@
-import json
-import logging
 import os
-import threading
-import time
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import datetime
+import telebot
+import yfinance as yf
 
-# ==========================================
-# 1. خادم المنفذ الوهمي لـ Render (Health Check)
-# ==========================================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-
-  def do_GET(self):
-    self.send_response(200)
-    self.send_header('Content-type', 'text/html')
-    self.end_headers()
-    self.wfile.write(b'OK - Scalping Bot is Running Live!')
-
-  def log_message(self, format, *args):
-    return
+# استخراج التوكن من متغيرات البيئة أو وضعه مباشرة
+TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
+bot = telebot.TeleBot(TOKEN)
 
 
-def run_port_listener():
-  port = int(os.environ.get('PORT', 10000))
-  server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-  server.serve_forever()
-
-
-threading.Thread(target=run_port_listener, daemon=True).start()
-
-# ==========================================
-# 2. الإعدادات وإرسال الرسائل
-# ==========================================
-logging.basicConfig(
-    level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
-
-
-def send_telegram_message(message, chat_id=None):
-  target_chat = chat_id or TELEGRAM_CHAT_ID
-  if not TELEGRAM_TOKEN or not target_chat:
-    return False
-
-  url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-  payload = {'chat_id': target_chat, 'text': message, 'parse_mode': 'HTML'}
-
+# دالة جلب بيانات التحليل والسعر المباشر
+def get_market_signal(symbol_ticker, symbol_name):
   try:
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(
-        url, data=data, headers={'Content-Type': 'application/json'}
+    ticker = yf.Ticker(symbol_ticker)
+    data = ticker.history(period="1d", interval="5m")
+
+    if data.empty:
+      return f"❌ تعذر جلب بيانات {symbol_name} حالياً."
+
+    current_price = data["Close"].iloc[-1]
+    prev_price = data["Close"].iloc[-2] if len(data) > 1 else current_price
+
+    # تحديد اتجاه مبسط بناءً على حركة السعر
+    direction = "🟢 شراء (BUY)" if current_price >= prev_price else "🔴 بيع (SELL)"
+
+    signal_msg = (
+        f"📊 **إشارة تداول جديدة ({symbol_name})**\n"
+        f"----------------------------------\n"
+        f"🔹 الاتجاه: {direction}\n"
+        f"💰 السعر الحالي: {current_price:.2f}\n"
+        f"⏱ التوقيت: {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+        f"----------------------------------\n"
+        f"💡 تم جلب الإشارة بنجاح!"
     )
-    with urllib.request.urlopen(req) as response:
-      return response.status == 200
+    return signal_msg
   except Exception as e:
-    logging.error(f'خطأ أثناء إرسال الرسالة: {e}')
-    return False
+    return f"❌ حدث خطأ أثناء جلب البيانات: {str(e)}"
 
 
-# ==========================================
-# 3. الاستماع والاستجابة لأوامر تليجرام
-# ==========================================
-def poll_telegram_updates():
-  offset = 0
-  while True:
-    try:
-      url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=30'
-      req = urllib.request.Request(url)
-      with urllib.request.urlopen(req) as response:
-        result = json.loads(response.read().decode('utf-8'))
-        if result.get('ok'):
-          for update in result.get('result', []):
-            offset = update['update_id'] + 1
-            message = update.get('message', {})
-            text = message.get('text', '')
-            chat_id = message.get('chat', {}).get('id')
-
-            if text == '/status':
-              reply = (
-                  '🟢 <b>حالة البوت:</b> متصل ويعمل 24/7 على Render!\n📊'
-                  ' <b>الرموز:</b> XAUUSD / EURUSD'
-              )
-              send_telegram_message(reply, chat_id)
-            elif text == '/signal':
-              reply = (
-                  '🔴 <b>السوق مغلق حالياً (عطلة نهاية الأسبوع).</b>\n⏳ ستتم'
-                  ' استئناف التحليلات مع افتتاح السوق.'
-              )
-              send_telegram_message(reply, chat_id)
-    except Exception as e:
-      logging.error(f'خطأ في استقبال الأوامر: {e}')
-      time.sleep(5)
+# أمر /start
+@bot.message_handler(commands=["start"])
+def send_welcome(message):
+  bot.reply_to(
+      message,
+      "أهلاً بك! البوت جاهز ومربوط بالسوق.\nأرسل /signal للحصول على إشارة جديدة أو /status لمعرفة الحالة.",
+  )
 
 
-if __name__ == '__main__':
-  send_telegram_message('🤖 <b>تم إقلاع البوت وتثبيت المنفذ بنجاح!</b>')
-  poll_telegram_updates()
+# أمر /status
+@bot.message_handler(commands=["status"])
+def send_status(message):
+  bot.reply_to(
+      message,
+      "🟢 حالة البوت: متصل ويعمل 24/7 على Render!\n📊 الرموز: XAUUSD / EURUSD",
+  )
+
+
+# أمر /signal (يعمل دائماً بدون فحص العطلة)
+@bot.message_handler(commands=["signal"])
+def send_signal(message):
+  bot.reply_to(message, "⏳ جاري تحليل السوق وجلب الإشارة...")
+
+  # جلب إشارة الذهب كمثال
+  gold_signal = get_market_signal("GC=F", "XAUUSD (الذهب)")
+  bot.send_message(message.chat.id, gold_signal, parse_mode="Markdown")
+
+
+if __name__ == "__main__":
+  print("🚀 البوت يعمل الآن ويستقبل الأوامر...")
+  bot.infinity_polling()
