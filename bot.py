@@ -2,6 +2,8 @@ import datetime
 import os
 from threading import Thread
 from flask import Flask
+import numpy as np
+import pandas as pd
 import telebot
 import yfinance as yf
 
@@ -11,7 +13,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-  return "Bot is Alive Free 24/7!"
+  return "Bot is Active 24/7!"
 
 
 def run_web_server():
@@ -19,11 +21,10 @@ def run_web_server():
   app.run(host="0.0.0.0", port=port)
 
 
-# تشغيل السيرفر في خلفية الكود
 t = Thread(target=run_web_server)
 t.start()
 
-# --- 2. إعدادات بوت التليجرام والسكالبينج ---
+# --- 2. إعدادات بوت التليجرام ---
 TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 bot = telebot.TeleBot(TOKEN)
 
@@ -36,75 +37,86 @@ def calculate_rsi(data, window=14):
   return 100 - (100 / (1 + rs))
 
 
+# --- 3. دالة التحليل الفني والسكالبينج ---
 def analyze_scalping(symbol_ticker, symbol_name):
   try:
-    df = yf.download(tickers=symbol_ticker, period="1d", interval="5m")
-    if df.empty or len(df) < 20:
-      return f"❌ لا تتوفر سيولة كافية لـ {symbol_name} حالياً."
+    # جلب بيانات 5 دقائق
+    df = yf.download(
+        tickers=symbol_ticker, period="1d", interval="5m", progress=False
+    )
 
+    if df.empty or len(df) < 20:
+      return f"❌ لا تتوفر بيانات كافية لـ {symbol_name} حالياً."
+
+    # معالجة الأعمدة في حال رجوع MultiIndex من yfinance
+    if isinstance(df.columns, pd.MultiIndex):
+      df.columns = df.columns.get_level_values(0)
+
+    # حساب المؤشرات
     df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["EMA_21"] = df["Close"].ewm(span=21, adjust=False).mean()
     df["RSI"] = calculate_rsi(df, window=14)
 
-    last_close = float(df["Close"].iloc[-1])
-    ema_9 = float(df["EMA_9"].iloc[-1])
-    ema_21 = float(df["EMA_21"].iloc[-1])
-    rsi = float(df["RSI"].iloc[-1])
+    # تحويل القيم إلى أرقام صريحة لتفادي خطأ Series
+    last_close = float(df["Close"].to_numpy()[-1])
+    ema_9 = float(df["EMA_9"].to_numpy()[-1])
+    ema_21 = float(df["EMA_21"].to_numpy()[-1])
+    rsi = float(df["RSI"].to_numpy()[-1])
 
-    action = None
-    if ema_9 > ema_21 and rsi > 50:
-      action = "BUY"
-    elif ema_9 < ema_21 and rsi < 50:
-      action = "SELL"
+    action = "BUY" if (ema_9 > ema_21 and rsi > 50) else "SELL"
 
-    if action:
-      pip_unit = 0.1 if "GC=F" in symbol_ticker else 0.0001
-      sl = (
-          last_close - (15 * pip_unit)
-          if action == "BUY"
-          else last_close + (15 * pip_unit)
-      )
-      tp = (
-          last_close + (30 * pip_unit)
-          if action == "BUY"
-          else last_close - (30 * pip_unit)
-      )
+    # إعدادات المخاطرة والستوب لحساب 43€
+    pip_unit = 0.1 if "GC=F" in symbol_ticker else 0.0001
+    sl = (
+        last_close - (15 * pip_unit)
+        if action == "BUY"
+        else last_close + (15 * pip_unit)
+    )
+    tp = (
+        last_close + (30 * pip_unit)
+        if action == "BUY"
+        else last_close - (30 * pip_unit)
+    )
 
-      return (
-          f"⚡ **إشارة سكالبينج جديدة ({symbol_name})** ⚡\n"
-          f"----------------------------------\n"
-          f"🎯 الأمر: **{action}**\n"
-          f"💵 سعر الدخول: `{last_close:.2f}`\n"
-          f"🛑 الستوب (SL): `{sl:.2f}` (15 pips)\n"
-          f"🎯 الهدف (TP): `{tp:.2f}` (30 pips)\n"
-          f"📊 RSI: `{rsi:.1f}` | EMA: `{ema_9:.2f}/{ema_21:.2f}`\n"
-          f"----------------------------------\n"
-          f"⏱ {datetime.datetime.now().strftime('%H:%M:%S')}"
-      )
-    else:
-      return f"⏳ السوق في حالة تذبذب لـ {symbol_name} (RSI: {rsi:.1f})."
+    msg = (
+        f"⚡ **إشارة سكالبينج حية ({symbol_name})** ⚡\n"
+        f"----------------------------------\n"
+        f"🎯 الأمر: **{action}**\n"
+        f"💵 سعر الدخول: `{last_close:.2f}`\n"
+        f"🛑 الستوب (SL): `{sl:.2f}` (15 pips)\n"
+        f"🎯 الهدف (TP): `{tp:.2f}` (30 pips)\n"
+        f"📊 RSI: `{rsi:.1f}` | EMA: `{ema_9:.2f}/{ema_21:.2f}`\n"
+        f"----------------------------------\n"
+        f"🛡 **تنبيه إدارة الحساب (43€):**\n"
+        f"🔹 حجم اللوت الموصى به: `0.01` فقط\n"
+        f"🔹 أقصى مخاطرة للصفقة: ~1.20€\n"
+        f"----------------------------------\n"
+        f"⏱ {datetime.datetime.now().strftime('%H:%M:%S')}"
+    )
+    return msg
 
   except Exception as e:
-    return f"❌ خطأ في التحليل: {str(e)}"
+    return f"❌ خطأ أثناء التحليل: {str(e)}"
 
 
+# --- 4. أوامر التليجرام ---
 @bot.message_handler(commands=["start"])
 def start(message):
   bot.reply_to(
       message,
-      "🤖 بوت السكالبينج المجاني جاهز!\nأرسل /signal للحصول على إشارة.",
+      "🤖 بوت السكالبينج جاهز وآمن لحساب 43€!\nأرسل /signal للحصول على صفقة.",
   )
 
 
 @bot.message_handler(commands=["status"])
 def status(message):
-  bot.reply_to(message, "🟢 حالة البوت: شغال ومجاني 100% على Render!")
+  bot.reply_to(message, "🟢 البوت متصل ومحدث 100% على Render!")
 
 
 @bot.message_handler(commands=["signal"])
 def signal(message):
   bot.reply_to(message, "🔍 جاري فحص مؤشرات السكالبينج (5m)...")
-  gold_res = analyze_scalping("GC=F", "XAUUSD")
+  gold_res = analyze_scalping("GC=F", "XAUUSD (الذهب)")
   bot.send_message(message.chat.id, gold_res, parse_mode="Markdown")
 
 
