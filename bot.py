@@ -25,7 +25,7 @@ t = Thread(target=run_web_server)
 t.start()
 
 # --- 2. إعدادات بوت التليجرام ---
-TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
+TOKEN = os.environ.get("BOT_TOKEN", "8805523416:AAEVs6fAXXC51ZgMfPhnJN8kqOXgvfTUseA")
 bot = telebot.TeleBot(TOKEN)
 
 
